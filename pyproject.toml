@@ -9,7 +9,7 @@ description = "Mac system maintenance CLI — clean, analyze, secure, monitor"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-authors = [{ name = "Asmit Ghosh", email = "asmitghosh3@gmail.com" }]
+authors = [{ name = "Ferrisama" }]
 keywords = ["mac", "macos", "cleaner", "maintenance", "cli", "system"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -32,9 +32,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/asmitghosh/macclean"
-Repository = "https://github.com/asmitghosh/macclean"
-"Bug Tracker" = "https://github.com/asmitghosh/macclean/issues"
+Homepage = "https://github.com/Ferrisama/macclean"
+Repository = "https://github.com/Ferrisama/macclean"
+"Bug Tracker" = "https://github.com/Ferrisama/macclean/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-mock>=3.0", "build>=1.0"]

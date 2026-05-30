@@ -2,7 +2,7 @@ class Macclean < Formula
   include Language::Python::Virtualenv
 
   desc "Mac system maintenance CLI — clean, analyze, secure, monitor"
-  homepage "https://github.com/asmitghosh/macclean"
+  homepage "https://github.com/Ferrisama/macclean"
   url "https://files.pythonhosted.org/packages/source/m/macclean/macclean-0.2.0.tar.gz"
   # Update sha256 after publishing to PyPI:
   # curl -sL <url> | shasum -a 256
