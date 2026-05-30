@@ -324,6 +324,8 @@ def _register_commands():
     main.add_command(_all_cmd, "all")
     main.add_command(_log_cmd, "log")
     main.add_command(_touchid_cmd, "touchid")
+    from macclean.cleaners import uninstall
+    main.add_command(uninstall.cmd, "uninstall")
 
 
 _register_commands()
