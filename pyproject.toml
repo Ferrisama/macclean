@@ -4,8 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "macclean"
-version = "0.1.0"
+version = "0.2.0"
+description = "Mac system maintenance CLI — clean, analyze, secure, monitor"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.10"
+authors = [{ name = "Asmit Ghosh", email = "asmitghosh3@gmail.com" }]
+keywords = ["mac", "macos", "cleaner", "maintenance", "cli", "system"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Utilities",
+]
 dependencies = [
     "click>=8.0",
     "rich>=13.0",
@@ -14,8 +31,13 @@ dependencies = [
     "tomli>=2.0; python_version < '3.11'",
 ]
 
+[project.urls]
+Homepage = "https://github.com/asmitghosh/macclean"
+Repository = "https://github.com/asmitghosh/macclean"
+"Bug Tracker" = "https://github.com/asmitghosh/macclean/issues"
+
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-mock>=3.0"]
+dev = ["pytest>=7.0", "pytest-mock>=3.0", "build>=1.0"]
 
 [project.scripts]
 macclean = "macclean.cli:main"
