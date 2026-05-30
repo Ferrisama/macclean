@@ -178,3 +178,35 @@ def test_find_duplicates_no_dupes(tmp_path):
     (d / "Helvetica.ttf").write_bytes(b"x" * 100)
     dupes = _find_duplicates([d])
     assert dupes == {}
+
+
+# Uninstaller tests
+from macclean.cleaners.uninstall import _find_bundle_id, _find_app_traces
+
+
+def test_find_bundle_id_from_plist(tmp_path):
+    import plistlib
+    app = tmp_path / "TestApp.app" / "Contents"
+    app.mkdir(parents=True)
+    plist_data = {"CFBundleIdentifier": "com.example.TestApp"}
+    with open(app / "Info.plist", "wb") as f:
+        plistlib.dump(plist_data, f)
+    bid = _find_bundle_id(tmp_path / "TestApp.app")
+    assert bid == "com.example.TestApp"
+
+
+def test_find_bundle_id_missing_plist(tmp_path):
+    app = tmp_path / "Ghost.app"
+    app.mkdir()
+    bid = _find_bundle_id(app)
+    assert bid is None
+
+
+def test_find_app_traces_returns_existing(tmp_path):
+    bundle_id = "com.example.TestApp"
+    support = tmp_path / "Library" / "Application Support" / bundle_id
+    support.mkdir(parents=True)
+    (support / "data.db").write_bytes(b"x" * 100)
+    traces = _find_app_traces(bundle_id, home=tmp_path)
+    paths = [t[1] for t in traces]
+    assert support in paths
