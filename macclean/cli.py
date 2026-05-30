@@ -48,16 +48,19 @@ def _import_cleaner(module_name: str):
 
 def _run_cleaner(module, name: str, dry_run: bool, yes: bool) -> int:
     """Run one cleaner, return bytes cleaned (0 if unknown)."""
+    from macclean.core.log import append_log
     try:
         result = module.analyze()
         before = result.total_bytes
         module.clean(result, dry_run=dry_run, yes=yes)
+        append_log(name, before, dry_run=dry_run)
         return before if not dry_run else 0
     except SystemExit:
         console.print(f"[yellow]Skipped {name} (needs sudo)[/]")
         return 0
     except Exception as e:
         console.print(f"[red]Error in {name}:[/] {e}")
+        return 0
         return 0
 
 
@@ -199,6 +202,64 @@ def _all_cmd(ctx, use_select: bool):
         _notify("macclean", f"Done — {format_size(total)} cleaned")
 
 
+@click.command("log")
+@click.option("--limit", default=50, show_default=True, help="Number of recent entries to show")
+def _log_cmd(limit: int):
+    """Show macclean operation history."""
+    from macclean.core.log import read_log
+    from macclean.core.utils import format_size
+
+    records = read_log(limit=limit)
+    if not records:
+        console.print("[dim]No history yet. Run some cleaners first.[/]")
+        return
+
+    table = Table(show_header=True, show_lines=False)
+    table.add_column("Time", style="dim")
+    table.add_column("Cleaner", style="bold")
+    table.add_column("Recovered", justify="right")
+    table.add_column("Mode")
+
+    total = 0
+    for r in reversed(records):
+        ts = r.get("timestamp", "")[:16].replace("T", " ")
+        size = r.get("bytes_cleaned", 0)
+        mode = "[dim]dry-run[/]" if r.get("dry_run") else "[green]cleaned[/]"
+        table.add_row(ts, r.get("cleaner", "?"), format_size(size), mode)
+        if not r.get("dry_run"):
+            total += size
+
+    console.print(Panel(table, title="[bold cyan]macclean History[/]",
+                        subtitle=f"Total cleaned: {format_size(total)}"))
+
+
+@click.command("touchid")
+def _touchid_cmd():
+    """Enable Touch ID authentication for sudo (no more password prompts)."""
+    from macclean.core.touchid import is_touchid_enabled, enable_touchid
+
+    if is_touchid_enabled():
+        console.print(Panel("[green]✓ Touch ID is already enabled for sudo.[/]",
+                            title="[bold cyan]Touch ID[/]"))
+        return
+
+    console.print(Panel(
+        "This will add [bold]pam_tid.so[/] to [dim]/etc/pam.d/sudo_local[/].\n"
+        "After this, sudo commands will prompt for Touch ID instead of password.",
+        title="[bold cyan]Enable Touch ID for sudo[/]",
+    ))
+    from macclean.core.utils import confirm
+    if not confirm("Enable Touch ID for sudo?"):
+        return
+
+    ok, msg = enable_touchid()
+    if ok:
+        console.print(f"[green]✓[/] {msg}")
+        console.print("  [dim]Open a new terminal to use Touch ID with sudo.[/]")
+    else:
+        console.print(f"[red]✗[/] {msg}")
+
+
 def _register_commands():
     from macclean.cleaners import (
         trash, crash_reports, browser, node, pip_cache, cargo,
@@ -251,6 +312,8 @@ def _register_commands():
     main.add_command(wifi.cmd, "wifi")
     main.add_command(connections.cmd, "connections")
     main.add_command(_all_cmd, "all")
+    main.add_command(_log_cmd, "log")
+    main.add_command(_touchid_cmd, "touchid")
 
 
 _register_commands()
