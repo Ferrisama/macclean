@@ -71,3 +71,23 @@ def test_docker_analyze_skips_when_not_running():
     with patch("macclean.cleaners.docker.run_cmd", return_value=("Cannot connect to daemon", 1)):
         result = docker_analyze()
     assert result.total_bytes == 0
+
+
+# ZSH tests
+from macclean.cleaners.zsh import analyze as zsh_analyze, _dedup_lines
+
+
+def test_dedup_lines_preserves_order():
+    lines = ["a", "b", "a", "c", "b", "d"]
+    assert _dedup_lines(lines) == ["a", "b", "c", "d"]
+
+
+def test_dedup_lines_empty():
+    assert _dedup_lines([]) == []
+
+
+def test_zsh_analyze_finds_history(tmp_path):
+    history = tmp_path / ".zsh_history"
+    history.write_text(": 1000:0;ls\n: 1001:0;ls\n: 1002:0;pwd\n")
+    result = zsh_analyze(home=tmp_path)
+    assert any("history" in item.label.lower() for item in result.items)
