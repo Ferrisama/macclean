@@ -22,7 +22,7 @@ def _register_commands():
         trash, crash_reports, browser, node, pip_cache, cargo,
         gradle, maven, go_cache, brew, docker, quicklook, memory,
         spotlight, system, timemachine, zsh, python_versions,
-        apps, xcode, ios_backups, fonts,
+        apps, xcode, ios_backups, fonts, stremio,
     )
     from macclean.core import disk
 
@@ -50,6 +50,7 @@ def _register_commands():
     main.add_command(xcode.cmd, "xcode")
     main.add_command(ios_backups.cmd, "ios-backups")
     main.add_command(fonts.cmd, "fonts")
+    main.add_command(stremio.cmd, "stremio")
     main.add_command(_all_cmd, "all")
 
 
@@ -61,14 +62,14 @@ def _all_cmd(ctx):
         trash, crash_reports, browser, node, pip_cache, cargo,
         gradle, maven, go_cache, brew, docker, quicklook, memory,
         spotlight, system, timemachine, zsh, python_versions,
-        apps, xcode, ios_backups, fonts,
+        apps, xcode, ios_backups, fonts, stremio,
     )
     dry_run = ctx.obj["dry_run"]
     yes = ctx.obj["yes"]
 
     runners = [
         trash, crash_reports, quicklook, memory, spotlight,
-        system, timemachine, browser, apps, xcode, ios_backups, fonts,
+        system, timemachine, browser, stremio, apps, xcode, ios_backups, fonts,
         brew, docker, python_versions, node, pip_cache, cargo,
         gradle, maven, go_cache, zsh,
     ]
