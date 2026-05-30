@@ -1,53 +1,7 @@
-import shutil
-from pathlib import Path
-import click
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from macclean.core.utils import CleanItem, AnalysisResult, format_size, confirm, dir_size
+from macclean.cleaners._dir_cleaners import DirCleanerConfig, make_dir_cleaner
 
-console = Console()
-
-
-def analyze(home: Path | None = None) -> AnalysisResult:
-    home = home or Path.home()
-    result = AnalysisResult()
-    path = home / ".m2" / "repository"
-    if path.exists():
-        result.items.append(CleanItem(label="Maven local repository", path=path, size_bytes=dir_size(path)))
-    return result
-
-
-def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> None:
-    if not result.items:
-        console.print("[green]No Maven repository found.[/]")
-        return
-
-    table = Table(show_header=True, show_lines=True)
-    table.add_column("Location")
-    table.add_column("Size", justify="right")
-    for item in result.items:
-        table.add_row(item.label, format_size(item.size_bytes))
-
-    console.print(Panel(table, title="[bold cyan]Maven Repository[/]"))
-    console.print(f"  Total recoverable: [bold]{format_size(result.total_bytes)}[/]")
-
-    if dry_run:
-        return
-    if not yes and not confirm("Clear Maven local repository?"):
-        return
-
-    for item in result.items:
-        try:
-            shutil.rmtree(item.path, ignore_errors=True)
-            console.print(f"  [green]✓[/] Cleared {item.label}")
-        except Exception as e:
-            console.print(f"  [yellow]⚠[/] {item.label}: {e}")
-
-
-@click.command()
-@click.pass_context
-def cmd(ctx):
-    """Clear Maven local repository cache."""
-    result = analyze()
-    clean(result, dry_run=ctx.obj["dry_run"], yes=ctx.obj["yes"])
+_cfg = DirCleanerConfig(
+    name="Maven local repository", title="Maven Repository",
+    dirs=[("Maven local repository", ".m2/repository")],
+)
+analyze, clean, cmd = make_dir_cleaner(_cfg)

@@ -8,33 +8,54 @@ from rich.rule import Rule
 
 console = Console()
 
-# Ordered list of (key, display_name, module_name) for all cleaners
+# Single source of truth: (cli_key, display_name, module_name)
+# cli_key  = the `macclean <cli_key>` command name
+# module_name = module inside macclean/cleaners/
 _CLEANERS = [
-    ("trash",        "Trash",               "trash"),
-    ("crash",        "Crash Reports",       "crash_reports"),
-    ("quicklook",    "QuickLook Cache",     "quicklook"),
-    ("memory",       "Inactive Memory",     "memory"),
-    ("spotlight",    "Spotlight Reindex",   "spotlight"),
-    ("system",       "System Caches & Logs","system"),
-    ("timemachine",  "Time Machine Snaps",  "timemachine"),
-    ("browser",      "Browser Caches",      "browser"),
-    ("stremio",      "Stremio Cache",       "stremio"),
-    ("apps",         "Ghost App Files",     "apps"),
-    ("xcode",        "Xcode Data",          "xcode"),
-    ("ios",          "iOS Backups",         "ios_backups"),
-    ("fonts",        "Duplicate Fonts",     "fonts"),
-    ("brew",         "Homebrew",            "brew"),
-    ("docker",       "Docker",              "docker"),
-    ("python",       "Python Versions",     "python_versions"),
-    ("node",         "Node.js Caches",      "node"),
-    ("pip",          "pip Cache",           "pip_cache"),
-    ("cargo",        "Cargo Cache",         "cargo"),
-    ("gradle",       "Gradle Cache",        "gradle"),
-    ("maven",        "Maven Repository",    "maven"),
-    ("go",           "Go Module Cache",     "go_cache"),
-    ("zsh",          "ZSH History",         "zsh"),
-    ("projects",     "Project Artifacts",   "projects"),
-    ("installers",   "Installer Files",     "installers"),
+    ("trash",          "Trash",                "trash"),
+    ("crash-reports",  "Crash Reports",        "crash_reports"),
+    ("quicklook",      "QuickLook Cache",      "quicklook"),
+    ("memory",         "Inactive Memory",      "memory"),
+    ("spotlight",      "Spotlight Reindex",    "spotlight"),
+    ("system",         "System Caches & Logs", "system"),
+    ("timemachine",    "Time Machine Snaps",   "timemachine"),
+    ("browser",        "Browser Caches",       "browser"),
+    ("stremio",        "Stremio Cache",        "stremio"),
+    ("apps",           "Ghost App Files",      "apps"),
+    ("xcode",          "Xcode Data",           "xcode"),
+    ("ios-backups",    "iOS Backups",          "ios_backups"),
+    ("fonts",          "Duplicate Fonts",      "fonts"),
+    ("brew",           "Homebrew",             "brew"),
+    ("docker",         "Docker",               "docker"),
+    ("python",         "Python Versions",      "python_versions"),
+    ("node",           "Node.js Caches",       "node"),
+    ("pip",            "pip Cache",            "pip_cache"),
+    ("cargo",          "Cargo Cache",          "cargo"),
+    ("gradle",         "Gradle Cache",         "gradle"),
+    ("maven",          "Maven Repository",     "maven"),
+    ("go",             "Go Module Cache",      "go_cache"),
+    ("zsh",            "ZSH History",          "zsh"),
+    ("projects",       "Project Artifacts",    "projects"),
+    ("installers",     "Installer Files",      "installers"),
+]
+
+# Non-cleaner tools: (cli_key, module_path, attr)
+_TOOLS = [
+    ("analyze",      "macclean.core.disk",           "analyze_cmd"),
+    ("status",       "macclean.core.disk",           "status_cmd"),
+    ("health",       "macclean.cleaners.health",     "cmd"),
+    ("largest",      "macclean.cleaners.largest",    "cmd"),
+    ("dupes",        "macclean.cleaners.dupes",      "cmd"),
+    ("security",     "macclean.cleaners.security",   "cmd"),
+    ("ports",        "macclean.cleaners.ports",      "cmd"),
+    ("privacy",      "macclean.cleaners.privacy",    "cmd"),
+    ("agents",       "macclean.cleaners.agents",     "cmd"),
+    ("login-items",  "macclean.cleaners.login_items","cmd"),
+    ("wifi",         "macclean.cleaners.wifi",       "cmd"),
+    ("connections",  "macclean.cleaners.connections","cmd"),
+    ("uninstall",    "macclean.cleaners.uninstall",  "cmd"),
+    ("outdated",     "macclean.cleaners.outdated",   "cmd"),
+    ("update",       "macclean.cleaners.update",     "cmd"),
 ]
 
 
@@ -305,65 +326,22 @@ def _touchid_cmd():
 
 
 def _register_commands():
-    from macclean.cleaners import (
-        trash, crash_reports, browser, node, pip_cache, cargo,
-        gradle, maven, go_cache, brew, docker, quicklook, memory,
-        spotlight, system, timemachine, zsh, python_versions,
-        apps, xcode, ios_backups, fonts, stremio,
-        largest, dupes, security, ports, privacy, agents, login_items, wifi, connections,
-    )
-    from macclean.core import disk
-    from macclean.cleaners import health
+    import importlib
 
-    main.add_command(disk.analyze_cmd, "analyze")
-    main.add_command(disk.status_cmd, "status")
-    main.add_command(health.cmd, "health")
-    # Cleaners
-    main.add_command(trash.cmd, "trash")
-    main.add_command(crash_reports.cmd, "crash-reports")
-    main.add_command(browser.cmd, "browser")
-    main.add_command(node.cmd, "node")
-    main.add_command(pip_cache.cmd, "pip")
-    main.add_command(cargo.cmd, "cargo")
-    main.add_command(gradle.cmd, "gradle")
-    main.add_command(maven.cmd, "maven")
-    main.add_command(go_cache.cmd, "go")
-    main.add_command(brew.cmd, "brew")
-    main.add_command(docker.cmd, "docker")
-    main.add_command(quicklook.cmd, "quicklook")
-    main.add_command(memory.cmd, "memory")
-    main.add_command(spotlight.cmd, "spotlight")
-    main.add_command(system.cmd, "system")
-    main.add_command(timemachine.cmd, "timemachine")
-    main.add_command(zsh.cmd, "zsh")
-    main.add_command(python_versions.cmd, "python")
-    main.add_command(apps.cmd, "apps")
-    main.add_command(xcode.cmd, "xcode")
-    main.add_command(ios_backups.cmd, "ios-backups")
-    main.add_command(fonts.cmd, "fonts")
-    main.add_command(stremio.cmd, "stremio")
-    # Disk intelligence
-    main.add_command(largest.cmd, "largest")
-    main.add_command(dupes.cmd, "dupes")
-    # Security & privacy
-    main.add_command(security.cmd, "security")
-    main.add_command(ports.cmd, "ports")
-    main.add_command(privacy.cmd, "privacy")
-    # Startup & background
-    main.add_command(agents.cmd, "agents")
-    main.add_command(login_items.cmd, "login-items")
-    # Network
-    main.add_command(wifi.cmd, "wifi")
-    main.add_command(connections.cmd, "connections")
+    # Register all cleaners from _CLEANERS (single source of truth)
+    for cli_key, _, module_name in _CLEANERS:
+        module = importlib.import_module(f"macclean.cleaners.{module_name}")
+        main.add_command(module.cmd, cli_key)
+
+    # Register tools from _TOOLS
+    for cli_key, module_path, attr in _TOOLS:
+        module = importlib.import_module(module_path)
+        main.add_command(getattr(module, attr), cli_key)
+
+    # Built-in commands
     main.add_command(_all_cmd, "all")
     main.add_command(_log_cmd, "log")
     main.add_command(_touchid_cmd, "touchid")
-    from macclean.cleaners import uninstall, projects, installers, outdated, update
-    main.add_command(uninstall.cmd, "uninstall")
-    main.add_command(projects.cmd, "projects")
-    main.add_command(installers.cmd, "installers")
-    main.add_command(outdated.cmd, "outdated")
-    main.add_command(update.cmd, "update")
 
 
 _register_commands()

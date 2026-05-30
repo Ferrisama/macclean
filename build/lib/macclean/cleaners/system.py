@@ -53,15 +53,15 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
     for item in result.items:
         try:
             for child in item.path.iterdir():
-                if child.is_dir(follow_symlinks=False):
+                if child.is_dir() and not child.is_symlink():
                     shutil.rmtree(child, ignore_errors=True)
-                else:
+                elif not child.is_symlink():
                     child.unlink(missing_ok=True)
             console.print(f"  [green]✓[/] Cleared {item.label}")
         except Exception as e:
             console.print(f"  [yellow]⚠[/] {item.label}: {e}")
 
-    out, code = run_cmd(["periodic", "daily", "weekly", "monthly"], timeout=300)
+    out, code = run_cmd(["/usr/sbin/periodic", "daily", "weekly", "monthly"], timeout=300)
     if code == 0:
         console.print("  [green]✓[/] macOS periodic maintenance scripts ran")
     else:
