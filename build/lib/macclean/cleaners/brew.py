@@ -4,7 +4,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from macclean.core.utils import CleanItem, AnalysisResult, format_size, confirm, dir_size, run_cmd
+from macclean.core.utils import CleanItem, AnalysisResult, format_size, confirm, dir_size, run_cmd, run_as_user
 
 console = Console()
 
@@ -14,7 +14,7 @@ def analyze(home: Path | None = None) -> AnalysisResult:
     if not shutil.which("brew"):
         return result
 
-    cache_out, code = run_cmd(["brew", "--cache"])
+    cache_out, code = run_as_user(["brew", "--cache"])
     if code != 0:
         return result
     cache_dir = Path(cache_out.strip())
@@ -25,7 +25,7 @@ def analyze(home: Path | None = None) -> AnalysisResult:
             size_bytes=dir_size(cache_dir),
         ))
 
-    outdated_out, _ = run_cmd(["brew", "outdated", "--quiet"])
+    outdated_out, _ = run_as_user(["brew", "outdated", "--quiet"])
     outdated = [l for l in outdated_out.splitlines() if l.strip()]
     if outdated:
         result.items.append(CleanItem(
@@ -60,7 +60,7 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
         (["brew", "cleanup", "--prune=all"], "brew cleanup"),
         (["brew", "autoremove"], "brew autoremove"),
     ]:
-        out, code = run_cmd(args, timeout=120)
+        out, code = run_as_user(args, timeout=120)
         if code == 0:
             console.print(f"  [green]✓[/] {label}")
         else:
