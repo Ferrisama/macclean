@@ -3,7 +3,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from macclean.core.utils import CleanItem, AnalysisResult, format_size, confirm, dir_size, run_cmd
+from macclean.core.utils import CleanItem, AnalysisResult, format_size, confirm, dir_size, run_as_user
 
 console = Console()
 
@@ -40,7 +40,7 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
     if not yes and not confirm("Clear pip cache?"):
         return
 
-    out, _ = run_cmd(["pip", "cache", "purge"])
+    out, _ = run_as_user(["pip", "cache", "purge"])
     console.print(f"  [green]✓[/] {out or 'pip cache cleared'}")
 
 
