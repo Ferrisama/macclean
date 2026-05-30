@@ -33,6 +33,8 @@ _CLEANERS = [
     ("maven",        "Maven Repository",    "maven"),
     ("go",           "Go Module Cache",     "go_cache"),
     ("zsh",          "ZSH History",         "zsh"),
+    ("projects",     "Project Artifacts",   "projects"),
+    ("installers",   "Installer Files",     "installers"),
 ]
 
 
