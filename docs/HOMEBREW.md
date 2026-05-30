@@ -9,14 +9,14 @@ pipx install macclean
 ## Option 2: Homebrew tap
 
 ```bash
-brew tap asmitghosh/macclean
+brew tap Ferrisama/macclean
 brew install macclean
 ```
 
 ## Option 3: From source
 
 ```bash
-git clone https://github.com/asmitghosh/macclean
+git clone https://github.com/Ferrisama/macclean
 cd macclean
 pipx install .
 ```
@@ -36,4 +36,4 @@ pipx install .
 
 1. Create a GitHub repo named `homebrew-macclean`
 2. Copy `Formula/macclean.rb` into it
-3. Users can then run `brew tap asmitghosh/macclean && brew install macclean`
+3. Users can then run `brew tap Ferrisama/macclean && brew install macclean`
