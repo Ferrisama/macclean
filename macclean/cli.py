@@ -163,13 +163,23 @@ def _print_summary(summary: list[tuple[str, int]], dry_run: bool) -> None:
 @click.command("all")
 @click.option("--select", "use_select", is_flag=True, default=False,
               help="Choose cleaners interactively before running")
+@click.option("--profile", default=None,
+              help="Run a preset profile: light, dev, deep")
 @click.pass_context
-def _all_cmd(ctx, use_select: bool):
+def _all_cmd(ctx, use_select: bool, profile: str | None):
     """Run every cleaner in sequence, confirming each step."""
+    from macclean.core.config import get_profile_cleaners
     dry_run = ctx.obj["dry_run"]
     yes = ctx.obj["yes"]
 
-    if use_select:
+    if profile:
+        profile_modules = get_profile_cleaners(profile)
+        if profile_modules is None:
+            runners = [(d, m) for _, d, m in _CLEANERS]
+        else:
+            runners = [(d, m) for _, d, m in _CLEANERS if m in profile_modules]
+        console.print(f"[dim]Profile: [bold]{profile}[/] — {len(runners)} cleaners[/]")
+    elif use_select:
         import questionary
         choices = [
             questionary.Choice(display_name, value=module_name, checked=True)
