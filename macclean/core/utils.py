@@ -58,6 +58,14 @@ def run_cmd(args: list[str], timeout: int = 60) -> tuple[str, int]:
         return f"Command not found: {args[0]}", 1
 
 
+def run_as_user(args: list[str], timeout: int = 60) -> tuple[str, int]:
+    """Run a command as the original (non-root) user, even when invoked via sudo."""
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user and os.geteuid() == 0:
+        args = ["sudo", "-u", sudo_user] + args
+    return run_cmd(args, timeout=timeout)
+
+
 def dir_size(path: Path) -> int:
     total = 0
     try:
