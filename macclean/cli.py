@@ -324,8 +324,12 @@ def _register_commands():
     main.add_command(_all_cmd, "all")
     main.add_command(_log_cmd, "log")
     main.add_command(_touchid_cmd, "touchid")
-    from macclean.cleaners import uninstall
+    from macclean.cleaners import uninstall, projects, installers, outdated, update
     main.add_command(uninstall.cmd, "uninstall")
+    main.add_command(projects.cmd, "projects")
+    main.add_command(installers.cmd, "installers")
+    main.add_command(outdated.cmd, "outdated")
+    main.add_command(update.cmd, "update")
 
 
 _register_commands()

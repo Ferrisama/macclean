@@ -210,3 +210,52 @@ def test_find_app_traces_returns_existing(tmp_path):
     traces = _find_app_traces(bundle_id, home=tmp_path)
     paths = [t[1] for t in traces]
     assert support in paths
+
+
+# Projects tests
+from macclean.cleaners.projects import analyze as projects_analyze, _scan_projects
+
+
+def test_scan_projects_finds_node_modules(tmp_path):
+    nm = tmp_path / "myproject" / "node_modules"
+    nm.mkdir(parents=True)
+    (nm / "index.js").write_bytes(b"x" * 5000)
+    results = _scan_projects(root=tmp_path)
+    assert any("node_modules" in str(r[1]) for r in results)
+
+
+def test_scan_projects_finds_venv(tmp_path):
+    venv = tmp_path / "project" / ".venv"
+    venv.mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_bytes(b"x" * 100)
+    results = _scan_projects(root=tmp_path)
+    assert any(".venv" in str(r[1]) for r in results)
+
+
+def test_scan_projects_skips_library(tmp_path):
+    lib_nm = tmp_path / "Library" / "node_modules"
+    lib_nm.mkdir(parents=True)
+    results = _scan_projects(root=tmp_path)
+    assert not any("Library" in str(r[1]) for r in results)
+
+
+# Installers tests
+from macclean.cleaners.installers import analyze as installers_analyze
+
+
+def test_installers_finds_dmg(tmp_path):
+    dl = tmp_path / "Downloads"
+    dl.mkdir()
+    dmg = dl / "Slack-4.35.dmg"
+    dmg.write_bytes(b"x" * 1024 * 1024 * 50)
+    result = installers_analyze(home=tmp_path)
+    assert any(".dmg" in item.label for item in result.items)
+    assert result.total_bytes >= 50 * 1024 * 1024
+
+
+def test_installers_skips_small_files(tmp_path):
+    dl = tmp_path / "Downloads"
+    dl.mkdir()
+    (dl / "tiny.zip").write_bytes(b"x" * 100)
+    result = installers_analyze(home=tmp_path)
+    assert result.total_bytes == 0
