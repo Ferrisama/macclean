@@ -24,10 +24,14 @@ def _register_commands():
         spotlight, system, timemachine, zsh, python_versions,
         apps, xcode, ios_backups, fonts, stremio,
     )
+    from macclean.cleaners import (
+        largest, dupes, security, ports, privacy, agents, login_items, wifi, connections,
+    )
     from macclean.core import disk
 
     main.add_command(disk.analyze_cmd, "analyze")
     main.add_command(disk.status_cmd, "status")
+    # Cleaning commands
     main.add_command(trash.cmd, "trash")
     main.add_command(crash_reports.cmd, "crash-reports")
     main.add_command(browser.cmd, "browser")
@@ -51,6 +55,19 @@ def _register_commands():
     main.add_command(ios_backups.cmd, "ios-backups")
     main.add_command(fonts.cmd, "fonts")
     main.add_command(stremio.cmd, "stremio")
+    # Disk intelligence
+    main.add_command(largest.cmd, "largest")
+    main.add_command(dupes.cmd, "dupes")
+    # Security & privacy
+    main.add_command(security.cmd, "security")
+    main.add_command(ports.cmd, "ports")
+    main.add_command(privacy.cmd, "privacy")
+    # Startup & background
+    main.add_command(agents.cmd, "agents")
+    main.add_command(login_items.cmd, "login-items")
+    # Network
+    main.add_command(wifi.cmd, "wifi")
+    main.add_command(connections.cmd, "connections")
     main.add_command(_all_cmd, "all")
 
 
