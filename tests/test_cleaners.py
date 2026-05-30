@@ -123,3 +123,58 @@ def test_has_virtualenvs_true(tmp_path):
 def test_has_virtualenvs_false(tmp_path):
     (tmp_path / ".pyenv" / "versions" / "3.10.12").mkdir(parents=True)
     assert _has_virtualenvs("3.10.12", pyenv_root=tmp_path / ".pyenv") is False
+
+
+# Apps, Xcode, iOS Backups, Fonts tests
+from macclean.cleaners.apps import analyze as apps_analyze, _get_installed_bundle_ids
+from macclean.cleaners.xcode import analyze as xcode_analyze
+from macclean.cleaners.ios_backups import analyze as ios_analyze
+from macclean.cleaners.fonts import analyze as fonts_analyze, _find_duplicates
+
+
+def test_get_installed_bundle_ids_empty(tmp_path):
+    ids = _get_installed_bundle_ids(apps_dirs=[tmp_path])
+    assert ids == set()
+
+
+def test_apps_analyze_finds_orphans(tmp_path):
+    support = tmp_path / "Library" / "Application Support" / "com.example.GoneApp"
+    support.mkdir(parents=True)
+    (support / "data.db").write_bytes(b"x" * 100)
+    result = apps_analyze(home=tmp_path, apps_dirs=[])
+    assert any("GoneApp" in item.label for item in result.items)
+
+
+def test_xcode_analyze_finds_derived_data(tmp_path):
+    dd = tmp_path / "Library" / "Developer" / "Xcode" / "DerivedData" / "MyApp-abc123"
+    dd.mkdir(parents=True)
+    (dd / "artifact").write_bytes(b"x" * 10000)
+    result = xcode_analyze(home=tmp_path)
+    assert any("DerivedData" in item.label for item in result.items)
+    assert result.total_bytes >= 10000
+
+
+def test_ios_analyze_finds_backups(tmp_path):
+    backup_dir = tmp_path / "Library" / "Application Support" / "MobileSync" / "Backup" / "abc123"
+    backup_dir.mkdir(parents=True)
+    (backup_dir / "Info.plist").write_bytes(b"x" * 500)
+    result = ios_analyze(home=tmp_path)
+    assert len(result.items) >= 1
+
+
+def test_find_duplicates_detects_same_name(tmp_path):
+    dir_a = tmp_path / "FontsA"
+    dir_b = tmp_path / "FontsB"
+    dir_a.mkdir(); dir_b.mkdir()
+    (dir_a / "Arial.ttf").write_bytes(b"x" * 100)
+    (dir_b / "Arial.ttf").write_bytes(b"x" * 100)
+    dupes = _find_duplicates([dir_a, dir_b])
+    assert "Arial.ttf" in dupes
+
+
+def test_find_duplicates_no_dupes(tmp_path):
+    d = tmp_path / "Fonts"
+    d.mkdir()
+    (d / "Helvetica.ttf").write_bytes(b"x" * 100)
+    dupes = _find_duplicates([d])
+    assert dupes == {}
