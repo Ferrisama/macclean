@@ -1,0 +1,2 @@
+[console_scripts]
+macclean = macclean.cli:main
