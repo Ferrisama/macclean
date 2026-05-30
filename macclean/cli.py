@@ -196,13 +196,45 @@ def _all_cmd(ctx, use_select: bool, profile: str | None):
     else:
         runners = [(d, m) for _, d, m in _CLEANERS]
 
-    summary: list[tuple[str, int]] = []
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    # Phase 1: analyze all in parallel
+    console.print("[dim]Analyzing...[/]")
+    analysis: dict[str, tuple[str, object]] = {}
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        future_map = {
+            executor.submit(_import_cleaner(m).analyze): (d, m)
+            for d, m in runners
+        }
+        for future in as_completed(future_map):
+            display, module_name = future_map[future]
+            try:
+                analysis[module_name] = (display, future.result())
+            except Exception as e:
+                console.print(f"[red]Error analyzing {display}:[/] {e}")
+                analysis[module_name] = (display, None)
+
+    # Phase 2: clean sequentially (requires user interaction)
+    summary: list[tuple[str, int]] = []
+    from macclean.core.log import append_log
     for display, module_name in runners:
-        console.rule(f"[bold]{display}[/]")
+        if module_name not in analysis:
+            continue
+        disp, result = analysis[module_name]
+        if result is None:
+            continue
+        console.rule(f"[bold]{disp}[/]")
         module = _import_cleaner(module_name)
-        cleaned = _run_cleaner(module, display, dry_run=dry_run, yes=yes)
-        summary.append((display, cleaned))
+        try:
+            before = result.total_bytes
+            module.clean(result, dry_run=dry_run, yes=yes)
+            append_log(disp, before, dry_run=dry_run)
+            summary.append((disp, before if not dry_run else 0))
+        except SystemExit:
+            console.print(f"[yellow]Skipped {disp} (needs sudo)[/]")
+        except Exception as e:
+            console.print(f"[red]Error in {disp}:[/] {e}")
 
     _print_summary(summary, dry_run)
 
