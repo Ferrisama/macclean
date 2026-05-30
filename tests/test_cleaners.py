@@ -91,3 +91,35 @@ def test_zsh_analyze_finds_history(tmp_path):
     history.write_text(": 1000:0;ls\n: 1001:0;ls\n: 1002:0;pwd\n")
     result = zsh_analyze(home=tmp_path)
     assert any("history" in item.label.lower() for item in result.items)
+
+
+# Python versions tests
+from macclean.cleaners.python_versions import _get_pyenv_versions, _has_virtualenvs
+
+
+def test_get_pyenv_versions_empty(tmp_path):
+    versions_dir = tmp_path / ".pyenv" / "versions"
+    versions_dir.mkdir(parents=True)
+    versions = _get_pyenv_versions(pyenv_root=tmp_path / ".pyenv")
+    assert versions == []
+
+
+def test_get_pyenv_versions_lists_dirs(tmp_path):
+    versions_dir = tmp_path / ".pyenv" / "versions"
+    (versions_dir / "3.10.12").mkdir(parents=True)
+    (versions_dir / "3.11.0").mkdir(parents=True)
+    versions = _get_pyenv_versions(pyenv_root=tmp_path / ".pyenv")
+    assert "3.10.12" in versions
+    assert "3.11.0" in versions
+
+
+def test_has_virtualenvs_true(tmp_path):
+    envs = tmp_path / ".pyenv" / "versions" / "3.10.12" / "envs"
+    envs.mkdir(parents=True)
+    (envs / "myenv").mkdir()
+    assert _has_virtualenvs("3.10.12", pyenv_root=tmp_path / ".pyenv") is True
+
+
+def test_has_virtualenvs_false(tmp_path):
+    (tmp_path / ".pyenv" / "versions" / "3.10.12").mkdir(parents=True)
+    assert _has_virtualenvs("3.10.12", pyenv_root=tmp_path / ".pyenv") is False
