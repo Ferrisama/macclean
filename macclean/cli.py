@@ -110,9 +110,10 @@ _CATEGORIES: dict[str, tuple[str, list[tuple[str, str, str]]]] = {
         ("login-items",  "Login Items",           "tool"),
     ]),
     "manage": ("Manage", [
-        ("uninstall",    "Uninstall App",         "tool"),
-        ("update",       "Update Packages",       "tool"),
-        ("quit-apps",    "Quit Apps",             "tool"),
+        ("uninstall",    "Uninstall App",              "tool"),
+        ("update",       "Update Packages",            "tool"),
+        ("quit-apps",    "Quit Apps",                  "tool"),
+        ("quit-apps",    "Configure Quit-Apps List",   "tool", {"do_configure": True}),
     ]),
 }
 
@@ -256,8 +257,8 @@ def _run_category_menu(ctx, category_key: str, dry_run: bool, yes: bool, style) 
     label, items = _CATEGORIES[category_key]
 
     choices = [
-        questionary.Choice(display, value=(cli_key, kind))
-        for cli_key, display, kind in items
+        questionary.Choice(entry[1], value=entry)
+        for entry in items
     ]
     selected = questionary.checkbox(
         f"{label} — select commands to run:",
@@ -270,8 +271,9 @@ def _run_category_menu(ctx, category_key: str, dry_run: bool, yes: bool, style) 
         return
 
     summary: list[tuple[str, int]] = []
-    for cli_key, kind in selected:
-        display = next(d for ck, d, _ in items if ck == cli_key)
+    for entry in selected:
+        cli_key, display, kind = entry[0], entry[1], entry[2]
+        kwargs = entry[3] if len(entry) > 3 else {}
         console.print(Rule(f"[bold]{display}[/]"))
         if kind == "cleaner":
             module_name = _CLEANER_BY_KEY[cli_key]
@@ -281,7 +283,7 @@ def _run_category_menu(ctx, category_key: str, dry_run: bool, yes: bool, style) 
         else:
             mod_path, attr = _TOOL_BY_KEY[cli_key]
             tool_module = importlib.import_module(mod_path)
-            ctx.invoke(getattr(tool_module, attr))
+            ctx.invoke(getattr(tool_module, attr), **kwargs)
 
     if summary:
         _print_summary(summary, dry_run)
