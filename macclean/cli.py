@@ -457,6 +457,27 @@ def _touchid_cmd():
         console.print(f"[red]✗[/] {msg}")
 
 
+@click.command("quick")
+@click.pass_context
+def _quick_cmd(ctx):
+    """Quick clean: trash, browser, crash reports. Safe, ~2 min."""
+    _run_preset_by_key("quick", dry_run=ctx.obj["dry_run"], yes=ctx.obj["yes"])
+
+
+@click.command("dev")
+@click.pass_context
+def _dev_cmd(ctx):
+    """Dev clean: brew, docker, node/pip/cargo, xcode, projects, zsh."""
+    _run_preset_by_key("dev", dry_run=ctx.obj["dry_run"], yes=ctx.obj["yes"])
+
+
+@click.command("deep")
+@click.pass_context
+def _deep_cmd(ctx):
+    """Deep clean: every cleaner, confirm each step."""
+    _run_preset_by_key("deep", dry_run=ctx.obj["dry_run"], yes=ctx.obj["yes"])
+
+
 def _register_commands():
     import importlib
 
@@ -474,6 +495,9 @@ def _register_commands():
     main.add_command(_all_cmd, "all")
     main.add_command(_log_cmd, "log")
     main.add_command(_touchid_cmd, "touchid")
+    main.add_command(_quick_cmd, "quick")
+    main.add_command(_dev_cmd, "dev")
+    main.add_command(_deep_cmd, "deep")
 
 
 _register_commands()
