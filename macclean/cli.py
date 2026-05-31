@@ -182,10 +182,10 @@ def main(ctx, dry_run, yes, as_json):
     ctx.obj["as_json"] = as_json
 
     if ctx.invoked_subcommand is None:
-        _interactive_menu(dry_run=dry_run, yes=yes)
+        _interactive_menu(ctx, dry_run=dry_run, yes=yes)
 
 
-def _interactive_menu(dry_run: bool, yes: bool) -> None:
+def _interactive_menu(ctx, dry_run: bool, yes: bool) -> None:
     import questionary
     from questionary import Style
 
@@ -202,17 +202,65 @@ def _interactive_menu(dry_run: bool, yes: bool) -> None:
 
     console.print(Panel(
         "[bold cyan]macclean[/] — Mac system maintenance\n"
-        "[dim]Space to select · Enter to run · Ctrl+C to quit[/]",
+        "[dim]Arrow keys · Enter to select · Ctrl+C to quit[/]",
         expand=False,
     ))
 
-    choices = [
-        questionary.Choice(display_name, value=module_name)
-        for _, display_name, module_name in _CLEANERS
-    ]
+    top_choices = []
+    for key, (label, desc, _) in _PRESETS.items():
+        top_choices.append(questionary.Choice(f"{label}  {desc}", value=("preset", key)))
+    top_choices.append(questionary.Separator())
+    for key, (label, _items) in _CATEGORIES.items():
+        top_choices.append(questionary.Choice(f"  {label} →", value=("category", key)))
 
+    selection = questionary.select(
+        "What would you like to do?",
+        choices=top_choices,
+        style=style,
+        use_shortcuts=False,
+    ).ask()
+
+    if selection is None:
+        console.print("[dim]Nothing selected.[/]")
+        return
+
+    kind, key = selection
+    if kind == "preset":
+        _run_preset_by_key(key, dry_run=dry_run, yes=yes)
+    else:
+        _run_category_menu(ctx, key, dry_run=dry_run, yes=yes, style=style)
+
+
+def _run_preset_by_key(key: str, dry_run: bool, yes: bool) -> None:
+    label, _desc, modules = _PRESETS[key]
+    if modules is None:
+        modules = [m for _, _, m in _CLEANERS]
+    console.print(f"\n[bold cyan]{label}[/]\n")
+    summary: list[tuple[str, int]] = []
+    for module_name in modules:
+        display = next((d for _, d, m in _CLEANERS if m == module_name), module_name)
+        console.print(Rule(f"[bold]{display}[/]"))
+        module = _import_cleaner(module_name)
+        cleaned = _run_cleaner(module, display, dry_run=dry_run, yes=yes)
+        summary.append((display, cleaned))
+    _print_summary(summary, dry_run)
+    if not dry_run:
+        total = sum(b for _, b in summary)
+        from macclean.core.utils import format_size
+        _notify("macclean", f"Done — {format_size(total)} cleaned")
+
+
+def _run_category_menu(ctx, category_key: str, dry_run: bool, yes: bool, style) -> None:
+    import importlib
+    import questionary
+    label, items = _CATEGORIES[category_key]
+
+    choices = [
+        questionary.Choice(display, value=(cli_key, kind))
+        for cli_key, display, kind in items
+    ]
     selected = questionary.checkbox(
-        "What would you like to clean?",
+        f"{label} — select commands to run:",
         choices=choices,
         style=style,
     ).ask()
@@ -222,20 +270,25 @@ def _interactive_menu(dry_run: bool, yes: bool) -> None:
         return
 
     summary: list[tuple[str, int]] = []
-
-    for module_name in selected:
-        display = next(d for _, d, m in _CLEANERS if m == module_name)
+    for cli_key, kind in selected:
+        display = next(d for ck, d, _ in items if ck == cli_key)
         console.print(Rule(f"[bold]{display}[/]"))
-        module = _import_cleaner(module_name)
-        cleaned = _run_cleaner(module, display, dry_run=dry_run, yes=yes)
-        summary.append((display, cleaned))
+        if kind == "cleaner":
+            module_name = _CLEANER_BY_KEY[cli_key]
+            module = _import_cleaner(module_name)
+            cleaned = _run_cleaner(module, display, dry_run=dry_run, yes=yes)
+            summary.append((display, cleaned))
+        else:
+            mod_path, attr = _TOOL_BY_KEY[cli_key]
+            tool_module = importlib.import_module(mod_path)
+            ctx.invoke(getattr(tool_module, attr))
 
-    _print_summary(summary, dry_run)
-
-    if not dry_run:
-        total = sum(b for _, b in summary)
-        from macclean.core.utils import format_size
-        _notify("macclean", f"Done — {format_size(total)} cleaned")
+    if summary:
+        _print_summary(summary, dry_run)
+        if not dry_run:
+            total = sum(b for _, b in summary)
+            from macclean.core.utils import format_size
+            _notify("macclean", f"Done — {format_size(total)} cleaned")
 
 
 def _print_summary(summary: list[tuple[str, int]], dry_run: bool) -> None:
