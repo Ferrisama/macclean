@@ -56,7 +56,87 @@ _TOOLS = [
     ("uninstall",    "macclean.cleaners.uninstall",  "cmd"),
     ("outdated",     "macclean.cleaners.outdated",   "cmd"),
     ("update",       "macclean.cleaners.update",     "cmd"),
+    ("quit-apps",    "macclean.cleaners.quit_apps",  "cmd"),
 ]
+
+# Lookup helpers built from the single-source-of-truth lists above
+_CLEANER_BY_KEY = {k: m for k, _, m in _CLEANERS}
+_TOOL_BY_KEY    = {k: (mod, attr) for k, mod, attr in _TOOLS}
+
+# Category definitions: key → (display_label, [(cli_key, display_name, kind)])
+# kind is "cleaner" (has analyze/clean interface) or "tool" (Click command with own UI)
+_CATEGORIES: dict[str, tuple[str, list[tuple[str, str, str]]]] = {
+    "clean": ("Clean", [
+        ("trash",         "Trash",                "cleaner"),
+        ("system",        "System Caches & Logs", "cleaner"),
+        ("browser",       "Browser Caches",       "cleaner"),
+        ("docker",        "Docker",               "cleaner"),
+        ("brew",          "Homebrew",             "cleaner"),
+        ("xcode",         "Xcode Data",           "cleaner"),
+        ("node",          "Node.js Caches",       "cleaner"),
+        ("pip",           "pip Cache",            "cleaner"),
+        ("cargo",         "Cargo Cache",          "cleaner"),
+        ("gradle",        "Gradle Cache",         "cleaner"),
+        ("maven",         "Maven Repository",     "cleaner"),
+        ("go",            "Go Module Cache",      "cleaner"),
+        ("zsh",           "ZSH History",          "cleaner"),
+        ("stremio",       "Stremio Cache",        "cleaner"),
+        ("timemachine",   "Time Machine Snaps",   "cleaner"),
+        ("crash-reports", "Crash Reports",        "cleaner"),
+        ("ios-backups",   "iOS Backups",          "cleaner"),
+        ("fonts",         "Duplicate Fonts",      "cleaner"),
+        ("memory",        "Inactive Memory",      "cleaner"),
+        ("quicklook",     "QuickLook Cache",      "cleaner"),
+        ("spotlight",     "Spotlight Reindex",    "cleaner"),
+        ("python",        "Python Versions",      "cleaner"),
+        ("projects",      "Project Artifacts",    "cleaner"),
+        ("installers",    "Installer Files",      "cleaner"),
+    ]),
+    "analyze": ("Analyze", [
+        ("health",       "System Health",         "tool"),
+        ("analyze",      "Disk Breakdown",        "tool"),
+        ("status",       "Live Disk Stats",       "tool"),
+        ("largest",      "Largest Files",         "tool"),
+        ("dupes",        "Duplicate Files",       "tool"),
+        ("outdated",     "Outdated Packages",     "tool"),
+        ("wifi",         "Wi-Fi Info",            "tool"),
+    ]),
+    "security": ("Security", [
+        ("security",     "Security Status",       "tool"),
+        ("privacy",      "App Permissions",       "tool"),
+        ("ports",        "Open Ports",            "tool"),
+        ("connections",  "Active Connections",    "tool"),
+        ("agents",       "Launch Agents",         "tool"),
+        ("login-items",  "Login Items",           "tool"),
+    ]),
+    "manage": ("Manage", [
+        ("uninstall",    "Uninstall App",         "tool"),
+        ("update",       "Update Packages",       "tool"),
+        ("quit-apps",    "Quit Apps",             "tool"),
+    ]),
+}
+
+# Preset definitions: key → (label, description, [module_names] | None)
+# module_names match _CLEANERS entries — all presets run cleaners only
+# None means every cleaner in _CLEANERS order
+_PRESETS: dict[str, tuple[str, str, list[str] | None]] = {
+    "quick": (
+        "⚡  Quick Clean",
+        "trash, browser, crash reports — safe, ~2 min",
+        ["trash", "browser", "crash_reports"],
+    ),
+    "dev": (
+        "🔧  Dev Clean",
+        "brew, docker, node/pip/cargo, xcode, projects, zsh",
+        ["brew", "docker", "node", "pip_cache", "cargo", "gradle",
+         "maven", "go_cache", "xcode", "projects", "zsh"],
+    ),
+    "deep": (
+        "🧹  Deep Clean",
+        "everything — confirm each step",
+        None,
+    ),
+}
 
 
 def _notify(title: str, message: str) -> None:
@@ -83,7 +163,6 @@ def _run_cleaner(module, name: str, dry_run: bool, yes: bool) -> int:
         return 0
     except Exception as e:
         console.print(f"[red]Error in {name}:[/] {e}")
-        return 0
         return 0
 
 
