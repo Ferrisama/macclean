@@ -56,7 +56,88 @@ _TOOLS = [
     ("uninstall",    "macclean.cleaners.uninstall",  "cmd"),
     ("outdated",     "macclean.cleaners.outdated",   "cmd"),
     ("update",       "macclean.cleaners.update",     "cmd"),
+    ("quit-apps",    "macclean.cleaners.quit_apps",  "cmd"),
 ]
+
+# Lookup helpers built from the single-source-of-truth lists above
+_CLEANER_BY_KEY = {k: m for k, _, m in _CLEANERS}
+_TOOL_BY_KEY    = {k: (mod, attr) for k, mod, attr in _TOOLS}
+
+# Category definitions: key → (display_label, [(cli_key, display_name, kind)])
+# kind is "cleaner" (has analyze/clean interface) or "tool" (Click command with own UI)
+_CATEGORIES: dict[str, tuple[str, list[tuple[str, str, str]]]] = {
+    "clean": ("Clean", [
+        ("trash",         "Trash",                "cleaner"),
+        ("system",        "System Caches & Logs", "cleaner"),
+        ("browser",       "Browser Caches",       "cleaner"),
+        ("docker",        "Docker",               "cleaner"),
+        ("brew",          "Homebrew",             "cleaner"),
+        ("xcode",         "Xcode Data",           "cleaner"),
+        ("node",          "Node.js Caches",       "cleaner"),
+        ("pip",           "pip Cache",            "cleaner"),
+        ("cargo",         "Cargo Cache",          "cleaner"),
+        ("gradle",        "Gradle Cache",         "cleaner"),
+        ("maven",         "Maven Repository",     "cleaner"),
+        ("go",            "Go Module Cache",      "cleaner"),
+        ("zsh",           "ZSH History",          "cleaner"),
+        ("stremio",       "Stremio Cache",        "cleaner"),
+        ("timemachine",   "Time Machine Snaps",   "cleaner"),
+        ("crash-reports", "Crash Reports",        "cleaner"),
+        ("ios-backups",   "iOS Backups",          "cleaner"),
+        ("fonts",         "Duplicate Fonts",      "cleaner"),
+        ("memory",        "Inactive Memory",      "cleaner"),
+        ("quicklook",     "QuickLook Cache",      "cleaner"),
+        ("spotlight",     "Spotlight Reindex",    "cleaner"),
+        ("python",        "Python Versions",      "cleaner"),
+        ("projects",      "Project Artifacts",    "cleaner"),
+        ("installers",    "Installer Files",      "cleaner"),
+    ]),
+    "analyze": ("Analyze", [
+        ("health",       "System Health",         "tool"),
+        ("analyze",      "Disk Breakdown",        "tool"),
+        ("status",       "Live Disk Stats",       "tool"),
+        ("largest",      "Largest Files",         "tool"),
+        ("dupes",        "Duplicate Files",       "tool"),
+        ("outdated",     "Outdated Packages",     "tool"),
+        ("wifi",         "Wi-Fi Info",            "tool"),
+    ]),
+    "security": ("Security", [
+        ("security",     "Security Status",       "tool"),
+        ("privacy",      "App Permissions",       "tool"),
+        ("ports",        "Open Ports",            "tool"),
+        ("connections",  "Active Connections",    "tool"),
+        ("agents",       "Launch Agents",         "tool"),
+        ("login-items",  "Login Items",           "tool"),
+    ]),
+    "manage": ("Manage", [
+        ("uninstall",    "Uninstall App",              "tool"),
+        ("update",       "Update Packages",            "tool"),
+        ("quit-apps",    "Quit Apps",                  "tool"),
+        ("quit-apps",    "Configure Quit-Apps List",   "tool", {"do_configure": True}),
+    ]),
+}
+
+# Preset definitions: key → (label, description, [module_names] | None)
+# module_names match _CLEANERS entries — all presets run cleaners only
+# None means every cleaner in _CLEANERS order
+_PRESETS: dict[str, tuple[str, str, list[str] | None]] = {
+    "quick": (
+        "⚡  Quick Clean",
+        "trash, browser, crash reports — safe, ~2 min",
+        ["trash", "browser", "crash_reports"],
+    ),
+    "dev": (
+        "🔧  Dev Clean",
+        "brew, docker, node/pip/cargo, xcode, projects, zsh",
+        ["brew", "docker", "node", "pip_cache", "cargo", "gradle",
+         "maven", "go_cache", "xcode", "projects", "zsh"],
+    ),
+    "deep": (
+        "🧹  Deep Clean",
+        "everything — confirm each step",
+        None,
+    ),
+}
 
 
 def _notify(title: str, message: str) -> None:
@@ -84,7 +165,6 @@ def _run_cleaner(module, name: str, dry_run: bool, yes: bool) -> int:
     except Exception as e:
         console.print(f"[red]Error in {name}:[/] {e}")
         return 0
-        return 0
 
 
 @click.group(invoke_without_command=True)
@@ -103,10 +183,10 @@ def main(ctx, dry_run, yes, as_json):
     ctx.obj["as_json"] = as_json
 
     if ctx.invoked_subcommand is None:
-        _interactive_menu(dry_run=dry_run, yes=yes)
+        _interactive_menu(ctx, dry_run=dry_run, yes=yes)
 
 
-def _interactive_menu(dry_run: bool, yes: bool) -> None:
+def _interactive_menu(ctx, dry_run: bool, yes: bool) -> None:
     import questionary
     from questionary import Style
 
@@ -123,17 +203,65 @@ def _interactive_menu(dry_run: bool, yes: bool) -> None:
 
     console.print(Panel(
         "[bold cyan]macclean[/] — Mac system maintenance\n"
-        "[dim]Space to select · Enter to run · Ctrl+C to quit[/]",
+        "[dim]Arrow keys · Enter to select · Ctrl+C to quit[/]",
         expand=False,
     ))
 
-    choices = [
-        questionary.Choice(display_name, value=module_name)
-        for _, display_name, module_name in _CLEANERS
-    ]
+    top_choices = []
+    for key, (label, desc, _) in _PRESETS.items():
+        top_choices.append(questionary.Choice(f"{label}  {desc}", value=("preset", key)))
+    top_choices.append(questionary.Separator())
+    for key, (label, _items) in _CATEGORIES.items():
+        top_choices.append(questionary.Choice(f"  {label} →", value=("category", key)))
 
+    selection = questionary.select(
+        "What would you like to do?",
+        choices=top_choices,
+        style=style,
+        use_shortcuts=False,
+    ).ask()
+
+    if selection is None:
+        console.print("[dim]Nothing selected.[/]")
+        return
+
+    kind, key = selection
+    if kind == "preset":
+        _run_preset_by_key(key, dry_run=dry_run, yes=yes)
+    else:
+        _run_category_menu(ctx, key, dry_run=dry_run, yes=yes, style=style)
+
+
+def _run_preset_by_key(key: str, dry_run: bool, yes: bool) -> None:
+    label, _desc, modules = _PRESETS[key]
+    if modules is None:
+        modules = [m for _, _, m in _CLEANERS]
+    console.print(f"\n[bold cyan]{label}[/]\n")
+    summary: list[tuple[str, int]] = []
+    for module_name in modules:
+        display = next((d for _, d, m in _CLEANERS if m == module_name), module_name)
+        console.print(Rule(f"[bold]{display}[/]"))
+        module = _import_cleaner(module_name)
+        cleaned = _run_cleaner(module, display, dry_run=dry_run, yes=yes)
+        summary.append((display, cleaned))
+    _print_summary(summary, dry_run)
+    if not dry_run:
+        total = sum(b for _, b in summary)
+        from macclean.core.utils import format_size
+        _notify("macclean", f"Done — {format_size(total)} cleaned")
+
+
+def _run_category_menu(ctx, category_key: str, dry_run: bool, yes: bool, style) -> None:
+    import importlib
+    import questionary
+    label, items = _CATEGORIES[category_key]
+
+    choices = [
+        questionary.Choice(entry[1], value=entry)
+        for entry in items
+    ]
     selected = questionary.checkbox(
-        "What would you like to clean?",
+        f"{label} — select commands to run:",
         choices=choices,
         style=style,
     ).ask()
@@ -143,20 +271,26 @@ def _interactive_menu(dry_run: bool, yes: bool) -> None:
         return
 
     summary: list[tuple[str, int]] = []
-
-    for module_name in selected:
-        display = next(d for _, d, m in _CLEANERS if m == module_name)
+    for entry in selected:
+        cli_key, display, kind = entry[0], entry[1], entry[2]
+        kwargs = entry[3] if len(entry) > 3 else {}
         console.print(Rule(f"[bold]{display}[/]"))
-        module = _import_cleaner(module_name)
-        cleaned = _run_cleaner(module, display, dry_run=dry_run, yes=yes)
-        summary.append((display, cleaned))
+        if kind == "cleaner":
+            module_name = _CLEANER_BY_KEY[cli_key]
+            module = _import_cleaner(module_name)
+            cleaned = _run_cleaner(module, display, dry_run=dry_run, yes=yes)
+            summary.append((display, cleaned))
+        else:
+            mod_path, attr = _TOOL_BY_KEY[cli_key]
+            tool_module = importlib.import_module(mod_path)
+            ctx.invoke(getattr(tool_module, attr), **kwargs)
 
-    _print_summary(summary, dry_run)
-
-    if not dry_run:
-        total = sum(b for _, b in summary)
-        from macclean.core.utils import format_size
-        _notify("macclean", f"Done — {format_size(total)} cleaned")
+    if summary:
+        _print_summary(summary, dry_run)
+        if not dry_run:
+            total = sum(b for _, b in summary)
+            from macclean.core.utils import format_size
+            _notify("macclean", f"Done — {format_size(total)} cleaned")
 
 
 def _print_summary(summary: list[tuple[str, int]], dry_run: bool) -> None:
@@ -325,6 +459,27 @@ def _touchid_cmd():
         console.print(f"[red]✗[/] {msg}")
 
 
+@click.command("quick")
+@click.pass_context
+def _quick_cmd(ctx):
+    """Quick clean: trash, browser, crash reports. Safe, ~2 min."""
+    _run_preset_by_key("quick", dry_run=ctx.obj["dry_run"], yes=ctx.obj["yes"])
+
+
+@click.command("dev")
+@click.pass_context
+def _dev_cmd(ctx):
+    """Dev clean: brew, docker, node/pip/cargo, xcode, projects, zsh."""
+    _run_preset_by_key("dev", dry_run=ctx.obj["dry_run"], yes=ctx.obj["yes"])
+
+
+@click.command("deep")
+@click.pass_context
+def _deep_cmd(ctx):
+    """Deep clean: every cleaner, confirm each step."""
+    _run_preset_by_key("deep", dry_run=ctx.obj["dry_run"], yes=ctx.obj["yes"])
+
+
 def _register_commands():
     import importlib
 
@@ -342,6 +497,9 @@ def _register_commands():
     main.add_command(_all_cmd, "all")
     main.add_command(_log_cmd, "log")
     main.add_command(_touchid_cmd, "touchid")
+    main.add_command(_quick_cmd, "quick")
+    main.add_command(_dev_cmd, "dev")
+    main.add_command(_deep_cmd, "deep")
 
 
 _register_commands()
