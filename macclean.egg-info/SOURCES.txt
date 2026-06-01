@@ -39,6 +39,7 @@ macclean/cleaners/privacy.py
 macclean/cleaners/projects.py
 macclean/cleaners/python_versions.py
 macclean/cleaners/quicklook.py
+macclean/cleaners/quit_apps.py
 macclean/cleaners/security.py
 macclean/cleaners/spotlight.py
 macclean/cleaners/stremio.py
