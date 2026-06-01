@@ -23,9 +23,9 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
     require_sudo()
     out, code = run_cmd(["mdutil", "-E", "/"], timeout=30)
     if code == 0:
-        console.print("  [green]✓[/] Spotlight reindex started")
+        console.print("  [green]+[/] Spotlight reindex started")
     else:
-        console.print(f"  [yellow]⚠[/] mdutil error: {out}")
+        console.print(f"  [yellow]![/] mdutil error: {out}")
 
 
 @click.command()

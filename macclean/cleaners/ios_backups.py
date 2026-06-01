@@ -66,9 +66,9 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
     for item in result.items:
         try:
             shutil.rmtree(item.path, ignore_errors=True)
-            console.print(f"  [green]✓[/] Deleted backup: {item.label}")
+            console.print(f"  [green]+[/] Deleted backup: {item.label}")
         except Exception as e:
-            console.print(f"  [yellow]⚠[/] {item.label}: {e}")
+            console.print(f"  [yellow]![/] {item.label}: {e}")
 
 
 @click.command()

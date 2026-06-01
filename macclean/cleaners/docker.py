@@ -87,9 +87,9 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
         if code == 0:
             reclaimed = _parse_reclaimed(out)
             suffix = f" ({format_size(reclaimed)} reclaimed)" if reclaimed else ""
-            console.print(f"  [green]✓[/] Pruned {label}{suffix}")
+            console.print(f"  [green]+[/] Pruned {label}{suffix}")
         else:
-            console.print(f"  [yellow]⚠[/] {label}: {out}")
+            console.print(f"  [yellow]![/] {label}: {out}")
 
 
 @click.command()

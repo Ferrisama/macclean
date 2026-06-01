@@ -49,13 +49,13 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
         parts = item.label.split(".")
         date_part = next((p for p in parts if p[:4].isdigit()), None)
         if not date_part:
-            console.print(f"  [yellow]⚠[/] Could not parse date from: {item.label}")
+            console.print(f"  [yellow]![/] Could not parse date from: {item.label}")
             continue
         out, code = run_cmd(["tmutil", "deletelocalsnapshots", date_part])
         if code == 0:
-            console.print(f"  [green]✓[/] Deleted snapshot {date_part}")
+            console.print(f"  [green]+[/] Deleted snapshot {date_part}")
         else:
-            console.print(f"  [yellow]⚠[/] {item.label}: {out}")
+            console.print(f"  [yellow]![/] {item.label}: {out}")
 
 
 @click.command()

@@ -102,9 +102,9 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
         version = item.path.name
         out, code = run_cmd(["pyenv", "uninstall", "-f", version], timeout=60)
         if code == 0:
-            console.print(f"  [green]✓[/] Removed Python {version}")
+            console.print(f"  [green]+[/] Removed Python {version}")
         else:
-            console.print(f"  [yellow]⚠[/] {version}: {out}")
+            console.print(f"  [yellow]![/] {version}: {out}")
 
 
 @click.command()

@@ -126,7 +126,7 @@ def cmd(ctx, app_name: str):
         return
 
     shutil.rmtree(app_path, ignore_errors=True)
-    console.print(f"  [green]✓[/] Removed {app_path}")
+    console.print(f"  [green]+[/] Removed {app_path}")
 
     for _, path, _ in traces:
         try:
@@ -134,6 +134,6 @@ def cmd(ctx, app_name: str):
                 shutil.rmtree(path, ignore_errors=True)
             else:
                 path.unlink(missing_ok=True)
-            console.print(f"  [green]✓[/] Removed {str(path).replace(str(home), '~')}")
+            console.print(f"  [green]+[/] Removed {str(path).replace(str(home), '~')}")
         except Exception as e:
-            console.print(f"  [yellow]⚠[/] {path}: {e}")
+            console.print(f"  [yellow]![/] {path}: {e}")

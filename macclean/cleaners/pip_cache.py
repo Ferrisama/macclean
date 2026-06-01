@@ -41,7 +41,7 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
         return
 
     out, _ = run_as_user(["pip", "cache", "purge"])
-    console.print(f"  [green]✓[/] {out or 'pip cache cleared'}")
+    console.print(f"  [green]+[/] {out or 'pip cache cleared'}")
 
 
 @click.command()

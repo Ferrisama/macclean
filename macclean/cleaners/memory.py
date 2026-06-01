@@ -25,9 +25,9 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
     require_sudo()
     out, code = run_cmd(["purge"])
     if code == 0:
-        console.print("  [green]✓[/] Inactive memory flushed")
+        console.print("  [green]+[/] Inactive memory flushed")
     else:
-        console.print(f"  [yellow]⚠[/] purge failed: {out}")
+        console.print(f"  [yellow]![/] purge failed: {out}")
 
 
 @click.command()

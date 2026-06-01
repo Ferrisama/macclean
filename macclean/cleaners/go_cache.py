@@ -38,9 +38,9 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
 
     out, code = run_cmd(["go", "clean", "-modcache"])
     if code == 0:
-        console.print("  [green]✓[/] Go module cache cleared")
+        console.print("  [green]+[/] Go module cache cleared")
     else:
-        console.print(f"  [yellow]⚠[/] go not on PATH or error: {out}")
+        console.print(f"  [yellow]![/] go not on PATH or error: {out}")
 
 
 @click.command()

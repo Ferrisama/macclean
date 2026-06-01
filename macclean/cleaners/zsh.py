@@ -79,16 +79,16 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
         lines = history.read_text(errors="replace").splitlines()
         deduped = _dedup_lines(lines)
         history.write_text("\n".join(deduped) + "\n")
-        console.print(f"  [green]✓[/] History deduped ({len(lines) - len(deduped)} entries removed)")
+        console.print(f"  [green]+[/] History deduped ({len(lines) - len(deduped)} entries removed)")
 
     compcache = home / ".zcompcache"
     if compcache.exists():
         shutil.rmtree(compcache, ignore_errors=True)
-        console.print("  [green]✓[/] Removed ~/.zcompcache")
+        console.print("  [green]+[/] Removed ~/.zcompcache")
 
     for dump in home.glob(".zcompdump*"):
         dump.unlink(missing_ok=True)
-    console.print("  [green]✓[/] Removed zcompdump files (zsh rebuilds on next open)")
+    console.print("  [green]+[/] Removed zcompdump files (zsh rebuilds on next open)")
 
 
 @click.command()

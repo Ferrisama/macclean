@@ -122,18 +122,18 @@ _CATEGORIES: dict[str, tuple[str, list[tuple[str, str, str]]]] = {
 # None means every cleaner in _CLEANERS order
 _PRESETS: dict[str, tuple[str, str, list[str] | None]] = {
     "quick": (
-        "⚡  Quick Clean",
+        "Quick Clean",
         "trash, browser, crash reports — safe, ~2 min",
         ["trash", "browser", "crash_reports"],
     ),
     "dev": (
-        "🔧  Dev Clean",
+        "Dev Clean",
         "brew, docker, node/pip/cargo, xcode, projects, zsh",
         ["brew", "docker", "node", "pip_cache", "cargo", "gradle",
          "maven", "go_cache", "xcode", "projects", "zsh"],
     ),
     "deep": (
-        "🧹  Deep Clean",
+        "Deep Clean",
         "everything — confirm each step",
         None,
     ),
@@ -438,7 +438,7 @@ def _touchid_cmd():
     from macclean.core.touchid import is_touchid_enabled, enable_touchid
 
     if is_touchid_enabled():
-        console.print(Panel("[green]✓ Touch ID is already enabled for sudo.[/]",
+        console.print(Panel("[green]Touch ID is already enabled for sudo.[/]",
                             title="[bold cyan]Touch ID[/]"))
         return
 
@@ -453,10 +453,10 @@ def _touchid_cmd():
 
     ok, msg = enable_touchid()
     if ok:
-        console.print(f"[green]✓[/] {msg}")
+        console.print(f"[green]+[/] {msg}")
         console.print("  [dim]Open a new terminal to use Touch ID with sudo.[/]")
     else:
-        console.print(f"[red]✗[/] {msg}")
+        console.print(f"[red]-[/] {msg}")
 
 
 @click.command("quick")

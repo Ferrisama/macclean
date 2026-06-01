@@ -62,9 +62,9 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
                     shutil.rmtree(child, ignore_errors=True)
                 elif not child.is_symlink():
                     child.unlink(missing_ok=True)
-            console.print(f"  [green]✓[/] Cleared {item.label}")
+            console.print(f"  [green]+[/] Cleared {item.label}")
         except Exception as e:
-            console.print(f"  [yellow]⚠[/] {item.label}: {e}")
+            console.print(f"  [yellow]![/] {item.label}: {e}")
 
 
 @click.command()

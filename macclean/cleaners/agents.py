@@ -32,7 +32,7 @@ def _check_agent(plist_path: Path) -> tuple[str, str, str, str]:
     from pathlib import Path as P
     prog_path = P(program.split()[0]) if program else None
     if program and prog_path and not prog_path.exists():
-        status = "[red]⚠ Binary missing[/]"
+        status = "[red]Binary missing[/]"
     elif not program:
         status = "[yellow]? No program set[/]"
     else:

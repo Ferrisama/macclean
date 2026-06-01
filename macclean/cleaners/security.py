@@ -21,7 +21,7 @@ _TCC_SERVICES = {
 
 
 def _check(label: str, good: bool, detail: str = "") -> tuple[str, str, str]:
-    status = "[green]✓ OK[/]" if good else "[red]✗ OFF[/]"
+    status = "[green]OK[/]" if good else "[red]OFF[/]"
     return label, status, detail
 
 
