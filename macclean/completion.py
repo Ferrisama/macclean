@@ -37,5 +37,5 @@ def install():
 
     with open(rc, "a") as f:
         f.write(snippet)
-    print(f"✓ Completion installed in {rc}")
+    print(f"Completion installed in {rc}")
     print(f"  Restart your shell or run: source {rc}")

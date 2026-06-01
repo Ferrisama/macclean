@@ -68,9 +68,9 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
     for item in sorted_items:
         try:
             item.path.unlink()
-            console.print(f"  [green]✓[/] Deleted {item.path.name}")
+            console.print(f"  [green]+[/] Deleted {item.path.name}")
         except Exception as e:
-            console.print(f"  [yellow]⚠[/] {item.path.name}: {e}")
+            console.print(f"  [yellow]![/] {item.path.name}: {e}")
 
 
 @click.command()

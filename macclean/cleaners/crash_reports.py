@@ -46,9 +46,9 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
         try:
             shutil.rmtree(item.path, ignore_errors=True)
             item.path.mkdir(parents=True, exist_ok=True)
-            console.print(f"  [green]✓[/] Cleared {item.label}")
+            console.print(f"  [green]+[/] Cleared {item.label}")
         except Exception as e:
-            console.print(f"  [yellow]⚠[/] {item.label}: {e}")
+            console.print(f"  [yellow]![/] {item.label}: {e}")
 
 
 @click.command()

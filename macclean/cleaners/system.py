@@ -57,19 +57,19 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
                     shutil.rmtree(child, ignore_errors=True)
                 elif not child.is_symlink():
                     child.unlink(missing_ok=True)
-            console.print(f"  [green]✓[/] Cleared {item.label}")
+            console.print(f"  [green]+[/] Cleared {item.label}")
         except Exception as e:
-            console.print(f"  [yellow]⚠[/] {item.label}: {e}")
+            console.print(f"  [yellow]![/] {item.label}: {e}")
 
     out, code = run_cmd(["/usr/sbin/periodic", "daily", "weekly", "monthly"], timeout=300)
     if code == 0:
-        console.print("  [green]✓[/] macOS periodic maintenance scripts ran")
+        console.print("  [green]+[/] macOS periodic maintenance scripts ran")
     else:
-        console.print(f"  [yellow]⚠[/] periodic scripts: {out[:200]}")
+        console.print(f"  [yellow]![/] periodic scripts: {out[:200]}")
 
     run_cmd(["dscacheutil", "-flushcache"])
     run_cmd(["killall", "-HUP", "mDNSResponder"])
-    console.print("  [green]✓[/] DNS cache flushed")
+    console.print("  [green]+[/] DNS cache flushed")
 
 
 @click.command()

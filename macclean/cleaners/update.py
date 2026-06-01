@@ -21,9 +21,9 @@ def cmd(ctx, brew: bool, do_pip: bool, npm: bool):
         console.print("\n[bold]Homebrew[/]")
         out, code = run_as_user(["brew", "upgrade"], timeout=300)
         if code == 0:
-            console.print("  [green]✓[/] brew upgrade complete")
+            console.print("  [green]+[/] brew upgrade complete")
         else:
-            console.print(f"  [yellow]⚠[/] brew upgrade: {out[:300]}")
+            console.print(f"  [yellow]![/] brew upgrade: {out[:300]}")
 
     if do_pip:
         console.print("\n[bold]pip[/]")
@@ -32,16 +32,16 @@ def cmd(ctx, brew: bool, do_pip: bool, npm: bool):
         if pkgs:
             _, code = run_as_user(["pip", "install", "--upgrade"] + pkgs, timeout=120)
             if code == 0:
-                console.print(f"  [green]✓[/] Upgraded {len(pkgs)} pip package(s)")
+                console.print(f"  [green]+[/] Upgraded {len(pkgs)} pip package(s)")
             else:
-                console.print(f"  [yellow]⚠[/] pip upgrade failed")
+                console.print(f"  [yellow]![/] pip upgrade failed")
         else:
-            console.print("  [green]✓[/] All pip packages up to date")
+            console.print("  [green]+[/] All pip packages up to date")
 
     if npm and shutil.which("npm"):
         console.print("\n[bold]npm[/]")
         out, code = run_as_user(["npm", "update", "-g"], timeout=120)
         if code == 0:
-            console.print("  [green]✓[/] npm global packages updated")
+            console.print("  [green]+[/] npm global packages updated")
         else:
-            console.print(f"  [yellow]⚠[/] npm update: {out[:200]}")
+            console.print(f"  [yellow]![/] npm update: {out[:200]}")

@@ -62,9 +62,9 @@ def clean(result: AnalysisResult, dry_run: bool = False, yes: bool = False) -> N
     ]:
         out, code = run_as_user(args, timeout=120)
         if code == 0:
-            console.print(f"  [green]✓[/] {label}")
+            console.print(f"  [green]+[/] {label}")
         else:
-            console.print(f"  [yellow]⚠[/] {label}: {out}")
+            console.print(f"  [yellow]![/] {label}: {out}")
 
 
 @click.command()

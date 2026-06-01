@@ -59,16 +59,16 @@ def make_dir_cleaner(config: DirCleanerConfig):
         if config.delete_cmd:
             out, code = run_as_user(config.delete_cmd)
             if code == 0:
-                console.print(f"  [green]✓[/] {config.name} cleared")
+                console.print(f"  [green]+[/] {config.name} cleared")
             else:
-                console.print(f"  [yellow]⚠[/] {out}")
+                console.print(f"  [yellow]![/] {out}")
         else:
             for item in result.items:
                 try:
                     shutil.rmtree(item.path, ignore_errors=True)
-                    console.print(f"  [green]✓[/] Cleared {item.label}")
+                    console.print(f"  [green]+[/] Cleared {item.label}")
                 except Exception as e:
-                    console.print(f"  [yellow]⚠[/] {item.label}: {e}")
+                    console.print(f"  [yellow]![/] {item.label}: {e}")
 
     @click.command()
     @click.pass_context
