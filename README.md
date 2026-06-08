@@ -2,11 +2,12 @@
 
 > Mac system maintenance CLI — clean, analyze, secure, monitor.
 
-40+ commands covering every category of Mac waste: caches, dev artifacts, Docker, Xcode, ghost app files, Time Machine snapshots, ZSH history, duplicate files, and more. Plus security checks, network inspection, and live system monitoring.
+40+ commands covering every category of Mac waste: caches, dev artifacts, Docker, Xcode, ghost app files, Time Machine snapshots, ZSH history, duplicate files, and more. Plus security checks, network inspection, and system monitoring.
 
-```
-pip install macclean   # coming soon
-pipx install .         # from source now
+Single self-contained binary. No Python, no runtime, no dependencies.
+
+```bash
+cargo install --git https://github.com/Ferrisama/macclean
 ```
 
 ---
@@ -14,12 +15,11 @@ pipx install .         # from source now
 ## Quick start
 
 ```bash
-macclean               # interactive menu — pick what to run
+macclean               # interactive menu
+macclean quick         # trash + browser + crash reports
+macclean dev           # brew + docker + node/pip/cargo + xcode + projects + zsh
+macclean deep          # everything
 macclean health        # one-page system snapshot
-macclean analyze       # disk usage by directory
-macclean all           # run every cleaner, confirm each step
-macclean all --profile light   # quick daily clean
-macclean all --profile dev     # developer-focused clean
 ```
 
 ---
@@ -35,37 +35,36 @@ macclean all --profile dev     # developer-focused clean
 | `macclean browser` | Safari, Chrome, Firefox, Brave caches |
 | `macclean xcode` | DerivedData, simulators, device support |
 | `macclean docker` | Unused images, volumes, containers, build cache |
-| `macclean gradle` | Gradle build cache |
-| `macclean cargo` | Rust registry cache |
-| `macclean node` | npm, yarn, pnpm caches |
 | `macclean brew` | Homebrew download cache + autoremove |
+| `macclean node` | npm, yarn, pnpm caches |
+| `macclean pip` | Python pip download cache |
+| `macclean cargo` | Rust registry cache |
+| `macclean gradle` | Gradle build cache |
+| `macclean maven` | Maven local repository |
+| `macclean go` | Go module cache |
+| `macclean python` | Unused pyenv Python versions |
+| `macclean zsh` | ZSH history duplicates + completion cache |
 | `macclean stremio` | Stremio video stream cache |
 | `macclean apps` | Ghost files from uninstalled apps |
-| `macclean zsh` | ZSH history duplicates + completion cache |
 | `macclean timemachine` | Local APFS snapshots (frees "System Data") |
 | `macclean crash-reports` | Crash logs and diagnostic reports |
 | `macclean projects` | `node_modules`, `.venv`, `build/`, `dist/` |
 | `macclean installers` | `.dmg`, `.pkg`, `.zip` in Downloads/Desktop |
 | `macclean ios-backups` | iPhone/iPad local backups |
-| `macclean pip` | Python pip download cache |
-| `macclean maven` | Maven local repository |
-| `macclean go` | Go module cache |
 | `macclean fonts` | Duplicate fonts in ~/Library/Fonts |
 | `macclean memory` | Flush inactive memory (`sudo purge`) |
 | `macclean quicklook` | Rebuild QuickLook server and cache |
 | `macclean spotlight` | Reindex Spotlight |
-| `macclean python` | Unused pyenv Python versions |
 
 ### Analysis
 
 | Command | What it shows |
 |---|---|
 | `macclean health` | CPU, memory, disk, battery, security at a glance |
-| `macclean analyze` | Disk usage breakdown by major directory |
-| `macclean status` | Live-refresh disk stats |
-| `macclean largest` | Biggest files on disk (`--min 500` for ≥500 MB) |
-| `macclean dupes` | Duplicate files by content hash |
+| `macclean largest` | Biggest files on disk (`--min-mb 500`) |
+| `macclean dupes` | Duplicate files by content hash (`--min 10`) |
 | `macclean outdated` | Outdated brew/pip/npm packages |
+| `macclean wifi` | Wi-Fi signal, channel, DNS |
 
 ### Security & Privacy
 
@@ -75,44 +74,24 @@ macclean all --profile dev     # developer-focused clean
 | `macclean privacy` | App permissions (camera, mic, screen recording) |
 | `macclean ports` | Open listening ports by process |
 | `macclean connections` | Active network connections by process |
+| `macclean agents` | List LaunchAgents/Daemons, flag broken ones |
+| `macclean login-items` | Show startup apps |
 
 ### System & Apps
 
 | Command | What it does |
 |---|---|
-| `macclean uninstall <App>` | Remove app + all 16 associated Library locations |
-| `macclean agents` | List LaunchAgents/Daemons, flag broken ones |
-| `macclean login-items` | Show startup apps |
+| `macclean uninstall <App>` | Remove app + all associated Library locations |
 | `macclean update` | Upgrade brew + pip + npm packages |
-| `macclean wifi` | Wi-Fi signal, channel, DNS |
-| `macclean log` | History of everything cleaned |
-| `macclean touchid` | Enable Touch ID for sudo |
+| `macclean quit-apps` | Quit configured apps before sleep/travel |
 
 ---
 
 ## Global flags
 
 ```bash
-macclean --dry-run all        # preview without deleting
-macclean --yes all            # skip all confirmations
-macclean all --profile light  # light, dev, or deep profile
-macclean all --select         # interactive checklist before running
-macclean-complete             # install tab completion (zsh/bash)
-```
-
----
-
-## Config (`~/.maccleanrc`)
-
-```toml
-[defaults]
-dry_run = false
-
-[profiles.light]
-cleaners = ["trash", "browser", "crash_reports", "zsh"]
-
-[profiles.dev]
-cleaners = ["brew", "docker", "gradle", "cargo", "node", "xcode", "zsh"]
+macclean --dry-run trash    # preview without deleting
+macclean --yes deep         # skip all confirmations
 ```
 
 ---
@@ -120,12 +99,13 @@ cleaners = ["brew", "docker", "gradle", "cargo", "node", "xcode", "zsh"]
 ## Install
 
 ```bash
-# From source (now)
+# From source
 git clone https://github.com/Ferrisama/macclean
 cd macclean
-pipx install .
+cargo build --release
+cp target/release/macclean /usr/local/bin/
 
-# Homebrew tap (after PyPI publish)
+# Via Homebrew tap (after release tag)
 brew tap Ferrisama/macclean
 brew install macclean
 ```
