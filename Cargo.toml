@@ -1,0 +1,33 @@
+[package]
+name = "macclean"
+version = "0.3.0"
+edition = "2021"
+authors = ["Ferrisama"]
+description = "Mac system maintenance CLI -- clean, analyze, secure, monitor"
+license = "MIT"
+repository = "https://github.com/Ferrisama/macclean"
+
+[[bin]]
+name = "macclean"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+inquire = "0.7"
+indicatif = "0.17"
+comfy-table = "7"
+colored = "2"
+walkdir = "2"
+rayon = "1"
+sha2 = "0.10"
+digest = "0.10"
+anyhow = "1"
+dirs = "5"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
