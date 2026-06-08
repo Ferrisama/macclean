@@ -1,3 +1,0 @@
-[console_scripts]
-macclean = macclean.cli:main
-macclean-complete = macclean.completion:install
