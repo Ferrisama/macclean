@@ -1,5 +1,7 @@
 pub mod cmd;
 pub mod fs;
+pub mod plist;
+pub mod trash;
 
 use std::path::PathBuf;
 

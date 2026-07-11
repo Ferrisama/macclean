@@ -35,8 +35,7 @@ impl Cleaner for AppsCleaner {
                         installed.insert(app_name.clone());
 
                         // Try to extract bundle ID from Info.plist
-                        let plist = entry.path().join("Contents/Info.plist");
-                        if let Some(bundle_id) = read_bundle_id(&plist) {
+                        if let Some(bundle_id) = crate::core::plist::read_bundle_id(&entry.path()) {
                             installed.insert(bundle_id.to_lowercase());
                         }
                     }
@@ -118,20 +117,4 @@ impl Cleaner for AppsCleaner {
         }
         Ok(())
     }
-}
-
-/// Read CFBundleIdentifier from an XML Info.plist. Returns None for binary plists or missing key.
-fn read_bundle_id(plist_path: &std::path::Path) -> Option<String> {
-    let contents = std::fs::read_to_string(plist_path).ok()?;
-    if contents.starts_with("bplist") { return None; }
-
-    let key_marker = "<key>CFBundleIdentifier</key>";
-    let key_pos = contents.find(key_marker)?;
-    let after = &contents[key_pos + key_marker.len()..];
-
-    let start = after.find("<string>")? + "<string>".len();
-    let end = after[start..].find("</string>")?;
-    let bundle_id = after[start..start + end].trim().to_string();
-
-    if bundle_id.is_empty() { None } else { Some(bundle_id) }
 }

@@ -1,20 +1,40 @@
-name: Publish to PyPI
+name: Release
 
 on:
   push:
     tags: ["v*"]
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
+  build:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.11"
-      - run: pip install build
-      - run: python -m build
-      - uses: pypa/gh-action-pypi-publish@release/v1
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target ${{ matrix.target }}
+      - run: |
+          cd target/${{ matrix.target }}/release
+          tar -czf macclean-${{ github.ref_name }}-${{ matrix.target }}.tar.gz macclean
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macclean-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/macclean-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz

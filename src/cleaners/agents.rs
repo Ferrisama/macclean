@@ -1,33 +1,33 @@
 use anyhow::Result;
 use colored::Colorize;
-use comfy_table::{Table, presets::UTF8_BORDERS_ONLY};
+use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
 use std::path::{Path, PathBuf};
 
-/// Extract the first `<string>...</string>` that follows a `<key>KEY</key>` in XML plist text.
-fn extract_after_key(xml: &str, key: &str) -> Option<String> {
-    let key_tag = format!("<key>{}</key>", key);
-    let pos = xml.find(&key_tag)?;
-    let rest = &xml[pos + key_tag.len()..];
-    let start = rest.find("<string>")? + "<string>".len();
-    let end   = rest[start..].find("</string>")?;
-    Some(rest[start..start + end].trim().to_string())
-}
+/// Read `Label` and program path (`Program`, falling back to the first
+/// `ProgramArguments` entry) from a launchd plist. Handles both XML and
+/// binary plists -- binary-encoded launchd plists are a known persistence
+/// trick and must not be silently skipped by a security-checking command.
+fn read_agent_info(path: &Path) -> Option<(Option<String>, Option<String>)> {
+    let dict = plist::Value::from_file(path).ok()?.into_dictionary()?;
 
-/// Find the binary path: try `Program` key first, then first entry of `ProgramArguments`.
-fn extract_program(xml: &str) -> Option<String> {
-    if let Some(p) = extract_after_key(xml, "Program") {
-        if !p.is_empty() {
-            return Some(p);
-        }
-    }
-    // ProgramArguments → array of strings; first <string> after the key
-    let tag = "<key>ProgramArguments</key>";
-    let pos = xml.find(tag)?;
-    let rest = &xml[pos + tag.len()..];
-    // skip <array> tag
-    let start = rest.find("<string>")? + "<string>".len();
-    let end   = rest[start..].find("</string>")?;
-    Some(rest[start..start + end].trim().to_string())
+    let label = dict
+        .get("Label")
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_string());
+
+    let program = dict
+        .get("Program")
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            dict.get("ProgramArguments")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+        });
+
+    Some((label, program))
 }
 
 fn scan_dir(dir: &Path, table: &mut Table) {
@@ -56,26 +56,16 @@ fn scan_dir(dir: &Path, table: &mut Table) {
             continue;
         }
 
-        let xml = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => {
-                // Binary plist — skip gracefully
-                continue;
-            }
+        let Some((label, program)) = read_agent_info(&path) else {
+            continue;
         };
 
-        // Quick binary plist check: starts with "bplist"
-        if xml.trim_start().starts_with("bplist") {
-            continue;
-        }
-
-        let label   = extract_after_key(&xml, "Label")
-            .unwrap_or_else(|| path.file_stem()
+        let label = label.unwrap_or_else(|| {
+            path.file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown")
-                .to_string());
-
-        let program = extract_program(&xml);
+                .to_string()
+        });
 
         let status = match &program {
             None => "No program key".yellow().to_string(),

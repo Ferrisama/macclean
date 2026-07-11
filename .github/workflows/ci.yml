@@ -9,13 +9,12 @@ on:
 jobs:
   test:
     runs-on: macos-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: ${{ matrix.python-version }}
-      - run: pip install -e ".[dev]"
-      - run: pytest tests/ -v
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --verbose
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --verbose

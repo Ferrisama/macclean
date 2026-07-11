@@ -50,7 +50,7 @@ impl Cleaner for FontsCleaner {
 
         // For duplicates, add only user-installed copies (those under ~/Library/Fonts)
         let user_font_dir = home.join("Library/Fonts");
-        for (_name, paths) in &filename_map {
+        for paths in filename_map.values() {
             if paths.len() <= 1 { continue; }
             for path in paths {
                 if path.starts_with(&user_font_dir) {

@@ -15,12 +15,31 @@ cargo install --git https://github.com/Ferrisama/macclean
 ## Quick start
 
 ```bash
-macclean               # interactive menu
+macclean               # interactive dashboard (TUI)
 macclean quick         # trash + browser + crash reports
 macclean dev           # brew + docker + node/pip/cargo + xcode + projects + zsh
 macclean deep          # everything
 macclean health        # one-page system snapshot
 ```
+
+Every command above also works non-interactively for scripting -- the dashboard is purely what launches when you run `macclean` with no subcommand.
+
+---
+
+## Dashboard
+
+Running `macclean` with no arguments opens a full-screen dashboard with four tabs. `Tab`/`Shift+Tab` (or click) switches between them; `Ctrl+C` quits from anywhere.
+
+| Tab | What it does |
+|---|---|
+| **Dashboard** | Live disk/memory gauges, CPU/load/battery, FileVault/Firewall/SIP status, biggest space users in home. `r` to refresh. |
+| **Clean** | The highest-value cache categories with sizes, checkboxes, and `1`/`2`/`3` for Quick/Dev/Deep presets. `Space` toggles, `Enter` runs the selected ones. |
+| **Uninstall** | Search installed apps, review every associated file (settings, caches, containers) before confirming. |
+| **Explore** | Drill-down disk usage browser -- `Enter` opens a folder, `Backspace`/`u` goes up, `d` trashes the selected item on the spot. |
+
+Analyzing, scanning, and building an uninstall plan all run in the background, so switching tabs or typing is never blocked waiting on a scan to finish.
+
+**Uninstall and Explore's delete move items to the macOS Trash, not a permanent delete** -- recoverable via Finder. The cache/log cleaners (Clean tab and all the `macclean <category>` commands below) delete immediately and permanently, since that data is disposable and regenerates on its own; moving multi-GB caches to Trash wouldn't even free the space until Trash is emptied.
 
 ---
 
@@ -81,7 +100,7 @@ macclean health        # one-page system snapshot
 
 | Command | What it does |
 |---|---|
-| `macclean uninstall <App>` | Remove app + all associated Library locations |
+| `macclean uninstall <App>` | Move app + all associated Library locations to Trash |
 | `macclean update` | Upgrade brew + pip + npm packages |
 | `macclean quit-apps` | Quit configured apps before sleep/travel |
 

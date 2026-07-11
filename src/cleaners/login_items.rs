@@ -93,12 +93,10 @@ pub fn run() -> Result<()> {
             } else {
                 "?".yellow().to_string()
             }
+        } else if PathBuf::from(path).exists() {
+            "Yes".green().to_string()
         } else {
-            if PathBuf::from(path).exists() {
-                "Yes".green().to_string()
-            } else {
-                "No".red().to_string()
-            }
+            "No".red().to_string()
         };
 
         table.add_row(vec![

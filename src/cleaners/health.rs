@@ -1,9 +1,24 @@
 use anyhow::Result;
 use colored::Colorize;
-use comfy_table::{Table, presets::UTF8_BORDERS_ONLY};
+use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
 use crate::core::cmd::run_cmd;
 use crate::core::fs::dir_size;
 use crate::ui::format_size;
+
+pub struct HealthSnapshot {
+    pub disk_total: u64,
+    pub disk_used: u64,
+    pub disk_free: u64,
+    pub mem_total: u64,
+    pub mem_used: u64,
+    pub ncpu: String,
+    pub load_avg: String,
+    pub battery: String,
+    pub filevault: bool,
+    pub firewall: bool,
+    pub sip: bool,
+    pub top_space: Vec<(String, u64)>,
+}
 
 fn filevault_status() -> bool {
     run_cmd(&["fdesetup", "status"]).output.contains("FileVault is On")
@@ -22,9 +37,9 @@ fn sip_status() -> bool {
     r.output.to_lowercase().contains("enabled")
 }
 
-pub fn run() -> Result<()> {
-    println!("\n{}", "[ System Health Snapshot ]".cyan().bold());
-
+/// Collect a point-in-time snapshot of disk/memory/CPU/battery/security
+/// status and the biggest known space users in the home directory.
+pub fn snapshot() -> HealthSnapshot {
     // ── Disk ──────────────────────────────────────────────────────────────────
     let df_r = run_cmd(&["df", "-k", "/"]);
     let (disk_total, disk_used, disk_free) = {
@@ -33,8 +48,8 @@ pub fn run() -> Result<()> {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 4 {
                 let blocks: u64 = parts[1].parse().unwrap_or(0);
-                let used: u64   = parts[2].parse().unwrap_or(0);
-                let avail: u64  = parts[3].parse().unwrap_or(0);
+                let used: u64 = parts[2].parse().unwrap_or(0);
+                let avail: u64 = parts[3].parse().unwrap_or(0);
                 t = (blocks * 1024, used * 1024, avail * 1024);
                 break;
             }
@@ -53,7 +68,6 @@ pub fn run() -> Result<()> {
     let mut pages_active: u64 = 0;
     let mut pages_speculative: u64 = 0;
     let mut pages_wired: u64 = 0;
-    let mut pages_inactive: u64 = 0;
 
     for line in vm_r.output.lines() {
         let trimmed = line.trim_start();
@@ -72,25 +86,17 @@ pub fn run() -> Result<()> {
             pages_speculative = parse_val(trimmed);
         } else if trimmed.starts_with("Pages wired down:") {
             pages_wired = parse_val(trimmed);
-        } else if trimmed.starts_with("Pages inactive:") {
-            pages_inactive = parse_val(trimmed);
         }
     }
     let mem_used = (pages_active + pages_speculative + pages_wired) * page_size;
-    // pages_inactive is parsed but not shown in the snapshot summary
-    let _ = pages_inactive;
 
     // ── CPU ───────────────────────────────────────────────────────────────────
-    let ncpu_r = run_cmd(&["sysctl", "-n", "hw.ncpu"]);
-    let ncpu = ncpu_r.output.trim().to_string();
-
-    let load_r = run_cmd(&["sysctl", "-n", "vm.loadavg"]);
-    // output: "{ 1.23 0.98 0.87 }"
-    let load_str = load_r.output.trim().to_string();
+    let ncpu = run_cmd(&["sysctl", "-n", "hw.ncpu"]).output.trim().to_string();
+    let load_avg = run_cmd(&["sysctl", "-n", "vm.loadavg"]).output.trim().to_string();
 
     // ── Battery ───────────────────────────────────────────────────────────────
     let batt_r = run_cmd(&["pmset", "-g", "batt"]);
-    let battery_line = batt_r
+    let battery = batt_r
         .output
         .lines()
         .find(|l| l.contains('%'))
@@ -98,97 +104,101 @@ pub fn run() -> Result<()> {
         .trim()
         .to_string();
 
-    // ── Print table ───────────────────────────────────────────────────────────
+    // ── Top space users in home ───────────────────────────────────────────────
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let targets = [
+        ("Gradle", ".gradle/caches"),
+        ("Xcode Dev", "Library/Developer"),
+        ("Containers", "Library/Containers"),
+        ("App Support", "Library/Application Support"),
+        ("Caches", "Library/Caches"),
+        ("npm", ".npm"),
+        ("cargo", ".cargo/registry"),
+    ];
+    let mut top_space: Vec<(String, u64)> = targets
+        .iter()
+        .map(|(label, rel)| {
+            let p = home.join(rel);
+            let sz = if p.exists() { dir_size(&p) } else { 0 };
+            (label.to_string(), sz)
+        })
+        .collect();
+    top_space.sort_by_key(|(_, s)| std::cmp::Reverse(*s));
+    top_space.truncate(6);
+
+    HealthSnapshot {
+        disk_total,
+        disk_used,
+        disk_free,
+        mem_total,
+        mem_used,
+        ncpu,
+        load_avg,
+        battery,
+        filevault: filevault_status(),
+        firewall: firewall_status(),
+        sip: sip_status(),
+        top_space,
+    }
+}
+
+pub fn run() -> Result<()> {
+    println!("\n{}", "[ System Health Snapshot ]".cyan().bold());
+    let s = snapshot();
+
     let mut table = Table::new();
     table.load_preset(UTF8_BORDERS_ONLY);
     table.set_header(vec!["Category", "Info"]);
 
-    // Disk
-    let disk_pct = if disk_total > 0 { disk_used * 100 / disk_total } else { 0 };
+    let disk_pct = if s.disk_total > 0 { s.disk_used * 100 / s.disk_total } else { 0 };
     table.add_row(vec![
         "Disk (/)".to_string(),
         format!(
             "{} used / {} total ({} free) - {}%",
-            format_size(disk_used),
-            format_size(disk_total),
-            format_size(disk_free),
+            format_size(s.disk_used),
+            format_size(s.disk_total),
+            format_size(s.disk_free),
             disk_pct
         ),
     ]);
 
-    // Memory
-    let mem_pct = if mem_total > 0 { mem_used * 100 / mem_total } else { 0 };
+    let mem_pct = if s.mem_total > 0 { s.mem_used * 100 / s.mem_total } else { 0 };
     table.add_row(vec![
         "Memory".to_string(),
         format!(
             "{} used / {} total - {}%",
-            format_size(mem_used),
-            format_size(mem_total),
+            format_size(s.mem_used),
+            format_size(s.mem_total),
             mem_pct
         ),
     ]);
 
-    // CPU
     table.add_row(vec![
         "CPU".to_string(),
-        format!("{} logical cores  |  Load avg: {}", ncpu, load_str),
+        format!("{} logical cores  |  Load avg: {}", s.ncpu, s.load_avg),
     ]);
 
-    // Battery
-    table.add_row(vec!["Battery".to_string(), battery_line]);
+    table.add_row(vec!["Battery".to_string(), s.battery.clone()]);
 
     println!("{}", table);
 
-    // ── Security summary ──────────────────────────────────────────────────────
     println!("\n{}", "[ Security Summary ]".cyan().bold());
     let mut sec_table = Table::new();
     sec_table.load_preset(UTF8_BORDERS_ONLY);
     sec_table.set_header(vec!["Check", "Status"]);
 
-    let checks = [
-        ("FileVault",  filevault_status()),
-        ("Firewall",   firewall_status()),
-        ("SIP",        sip_status()),
-    ];
-    for (name, ok) in &checks {
-        let status = if *ok {
-            "OK".green().to_string()
-        } else {
-            "OFF".red().to_string()
-        };
+    for (name, ok) in [("FileVault", s.filevault), ("Firewall", s.firewall), ("SIP", s.sip)] {
+        let status = if ok { "OK".green().to_string() } else { "OFF".red().to_string() };
         sec_table.add_row(vec![name.to_string(), status]);
     }
     println!("{}", sec_table);
-
-    // ── Top space users in home ───────────────────────────────────────────────
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-
-    let targets = [
-        ("Gradle",       ".gradle/caches"),
-        ("Xcode Dev",    "Library/Developer"),
-        ("Containers",   "Library/Containers"),
-        ("App Support",  "Library/Application Support"),
-        ("Caches",       "Library/Caches"),
-        ("npm",          ".npm"),
-        ("cargo",        ".cargo/registry"),
-    ];
-
-    let mut sizes: Vec<(&str, u64)> = targets
-        .iter()
-        .map(|(label, rel)| {
-            let p = home.join(rel);
-            let sz = if p.exists() { dir_size(&p) } else { 0 };
-            (*label, sz)
-        })
-        .collect();
-    sizes.sort_by_key(|(_, s)| std::cmp::Reverse(*s));
 
     println!("\n{}", "[ Top Space Users (Home) ]".cyan().bold());
     let mut sz_table = Table::new();
     sz_table.load_preset(UTF8_BORDERS_ONLY);
     sz_table.set_header(vec!["Location", "Size"]);
-    for (label, sz) in sizes.iter().take(6) {
-        sz_table.add_row(vec![label.to_string(), format_size(*sz)]);
+    for (label, sz) in &s.top_space {
+        sz_table.add_row(vec![label.clone(), format_size(*sz)]);
     }
     println!("{}", sz_table);
 

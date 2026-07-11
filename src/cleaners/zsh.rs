@@ -115,7 +115,7 @@ fn dedup_zsh_history(contents: &str) -> String {
         // Extract the command part for dedup key
         let key = if line.starts_with(": ") {
             // extended_history format: ": timestamp:elapsed;command"
-            line.splitn(2, ';').nth(1).unwrap_or(line).trim()
+            line.split_once(';').map_or(*line, |(_, cmd)| cmd).trim()
         } else {
             line.trim()
         };
