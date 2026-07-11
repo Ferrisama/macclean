@@ -150,7 +150,7 @@ pub fn run() -> Result<()> {
     table.load_preset(UTF8_BORDERS_ONLY);
     table.set_header(vec!["Category", "Info"]);
 
-    let disk_pct = if s.disk_total > 0 { s.disk_used * 100 / s.disk_total } else { 0 };
+    let disk_pct = (s.disk_used * 100).checked_div(s.disk_total).unwrap_or(0);
     table.add_row(vec![
         "Disk (/)".to_string(),
         format!(
@@ -162,7 +162,7 @@ pub fn run() -> Result<()> {
         ),
     ]);
 
-    let mem_pct = if s.mem_total > 0 { s.mem_used * 100 / s.mem_total } else { 0 };
+    let mem_pct = (s.mem_used * 100).checked_div(s.mem_total).unwrap_or(0);
     table.add_row(vec![
         "Memory".to_string(),
         format!(

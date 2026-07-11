@@ -71,7 +71,7 @@ pub fn run(min_mb: u64, scan_path: Option<PathBuf>) -> Result<()> {
             .map(|path| hash_file(path))
             .collect();
 
-        for (path, hash) in paths.iter().zip(hashes.into_iter()) {
+        for (path, hash) in paths.iter().zip(hashes) {
             pb.inc(1);
             if let Some(h) = hash {
                 by_hash.entry(h).or_default().push((path.clone(), *size));

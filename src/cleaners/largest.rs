@@ -40,7 +40,7 @@ pub fn run(min_mb: u64, limit: usize, scan_path: Option<PathBuf>) -> Result<()> 
 
     // Sort by size descending, take top N
     let mut results = entries;
-    results.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    results.sort_unstable_by_key(|item| std::cmp::Reverse(item.1));
     results.truncate(limit);
 
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));

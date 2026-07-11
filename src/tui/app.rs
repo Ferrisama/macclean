@@ -355,10 +355,10 @@ impl App {
             KeyCode::Char('2') => self.apply_preset(DEV_PRESET),
             KeyCode::Char('3') => self.apply_preset(DEEP_PRESET),
             KeyCode::Char('R') => self.start_analyze_clean(),
-            KeyCode::Enter | KeyCode::Char('c') => {
-                if self.clean_categories.iter().any(|c| c.selected) {
-                    return Action::RunClean;
-                }
+            KeyCode::Enter | KeyCode::Char('c')
+                if self.clean_categories.iter().any(|c| c.selected) =>
+            {
+                return Action::RunClean;
             }
             _ => {}
         }
@@ -559,10 +559,8 @@ impl App {
                     self.start_explore_scan();
                 }
             }
-            KeyCode::Char('d') => {
-                if !self.explore_entries.is_empty() {
-                    self.explore_confirm_delete = Some(self.explore_cursor);
-                }
+            KeyCode::Char('d') if !self.explore_entries.is_empty() => {
+                self.explore_confirm_delete = Some(self.explore_cursor);
             }
             _ => {}
         }
