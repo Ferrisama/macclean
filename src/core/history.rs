@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -13,6 +14,64 @@ pub struct HistoryRecord {
     pub original_path: PathBuf,
     pub size_bytes: u64,
     pub method: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreState {
+    Available,
+    OriginalExists,
+    TrashItemMissing,
+    NotTrashBacked,
+}
+
+impl RestoreState {
+    pub fn label(&self) -> &'static str {
+        match self {
+            RestoreState::Available => "available",
+            RestoreState::OriginalExists => "original exists",
+            RestoreState::TrashItemMissing => "missing from Trash",
+            RestoreState::NotTrashBacked => "not restorable",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub timestamp: u64,
+    pub cleaner: String,
+    pub item_count: usize,
+    pub total_bytes: u64,
+    pub method: String,
+    pub restorable_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestoreOutcome {
+    pub record: HistoryRecord,
+    pub restored: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReceiptItem {
+    pub label: String,
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub method: String,
+    pub status: String,
+    pub restore: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CleanupReceipt {
+    session_id: String,
+    timestamp: u64,
+    command: String,
+    cleaner: String,
+    method: String,
+    items: Vec<ReceiptItem>,
 }
 
 impl HistoryRecord {
@@ -32,6 +91,20 @@ impl HistoryRecord {
             original_path,
             size_bytes,
             method: method.into(),
+        }
+    }
+
+    pub fn restore_state(&self) -> RestoreState {
+        if self.method != "trash" {
+            return RestoreState::NotTrashBacked;
+        }
+        if self.original_path.exists() {
+            return RestoreState::OriginalExists;
+        }
+        if trash_candidate_path(&self.original_path).is_some_and(|path| path.exists()) {
+            RestoreState::Available
+        } else {
+            RestoreState::TrashItemMissing
         }
     }
 }
@@ -61,6 +134,28 @@ pub fn append(record: &HistoryRecord) -> Result<()> {
     Ok(())
 }
 
+pub fn write_receipt(
+    session_id: &str,
+    cleaner: &str,
+    method: &str,
+    items: Vec<ReceiptItem>,
+) -> Result<PathBuf> {
+    let path = receipt_path(session_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let receipt = CleanupReceipt {
+        session_id: session_id.into(),
+        timestamp: now_secs(),
+        command: std::env::args().collect::<Vec<_>>().join(" "),
+        cleaner: cleaner.into(),
+        method: method.into(),
+        items,
+    };
+    fs::write(&path, serde_json::to_string_pretty(&receipt)?)?;
+    Ok(path)
+}
+
 pub fn read_all() -> Result<Vec<HistoryRecord>> {
     let path = history_path()?;
     if !path.exists() {
@@ -85,7 +180,38 @@ pub fn latest_session() -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("No macclean history found."))
 }
 
-pub fn restore_session(session_id: Option<&str>) -> Result<(usize, usize)> {
+pub fn session_summaries() -> Result<Vec<SessionSummary>> {
+    let mut summaries = Vec::<SessionSummary>::new();
+    for record in read_all()? {
+        if let Some(summary) = summaries
+            .iter_mut()
+            .find(|summary| summary.session_id == record.session_id)
+        {
+            summary.timestamp = summary.timestamp.max(record.timestamp);
+            summary.item_count += 1;
+            summary.total_bytes = summary.total_bytes.saturating_add(record.size_bytes);
+            if record.restore_state() == RestoreState::Available {
+                summary.restorable_count += 1;
+            }
+        } else {
+            let restorable_count = usize::from(record.restore_state() == RestoreState::Available);
+            summaries.push(SessionSummary {
+                session_id: record.session_id.clone(),
+                timestamp: record.timestamp,
+                cleaner: record.cleaner.clone(),
+                item_count: 1,
+                total_bytes: record.size_bytes,
+                method: record.method.clone(),
+                restorable_count,
+            });
+        }
+    }
+
+    summaries.sort_by_key(|summary| std::cmp::Reverse(summary.timestamp));
+    Ok(summaries)
+}
+
+pub fn restore_session_detailed(session_id: Option<&str>) -> Result<Vec<RestoreOutcome>> {
     let session = match session_id {
         Some(id) => id.to_string(),
         None => latest_session()?,
@@ -103,15 +229,22 @@ pub fn restore_session(session_id: Option<&str>) -> Result<(usize, usize)> {
         );
     }
 
-    let mut restored = 0usize;
-    let mut failed = 0usize;
+    let mut outcomes = Vec::new();
     for record in records {
         match restore_record(&record) {
-            Ok(()) => restored += 1,
-            Err(_) => failed += 1,
+            Ok(()) => outcomes.push(RestoreOutcome {
+                record,
+                restored: true,
+                error: None,
+            }),
+            Err(e) => outcomes.push(RestoreOutcome {
+                record,
+                restored: false,
+                error: Some(e.to_string()),
+            }),
         }
     }
-    Ok((restored, failed))
+    Ok(outcomes)
 }
 
 fn restore_record(record: &HistoryRecord) -> Result<()> {
@@ -122,16 +255,15 @@ fn restore_record(record: &HistoryRecord) -> Result<()> {
         );
     }
 
-    let Some(name) = record.original_path.file_name() else {
+    if record.original_path.file_name().is_none() {
         bail!(
             "Original path has no file name: {}",
             record.original_path.display()
         );
     };
-    let Some(home) = dirs::home_dir() else {
-        bail!("Could not find home directory.");
+    let Some(trashed) = trash_candidate_path(&record.original_path) else {
+        bail!("Could not find home Trash directory.");
     };
-    let trashed = home.join(".Trash").join(name);
     if !trashed.exists() {
         bail!("Trash item not found: {}", trashed.display());
     }
@@ -142,11 +274,26 @@ fn restore_record(record: &HistoryRecord) -> Result<()> {
     Ok(())
 }
 
+fn trash_candidate_path(original_path: &Path) -> Option<PathBuf> {
+    let name = original_path.file_name()?;
+    let home = dirs::home_dir()?;
+    Some(home.join(".Trash").join(name))
+}
+
 fn history_path() -> Result<PathBuf> {
     let Some(home) = dirs::home_dir() else {
         bail!("Could not find home directory.");
     };
     Ok(home.join("Library/Application Support/macclean/history.tsv"))
+}
+
+pub fn receipt_path(session_id: &str) -> Result<PathBuf> {
+    let Some(home) = dirs::home_dir() else {
+        bail!("Could not find home directory.");
+    };
+    Ok(home
+        .join("Library/Application Support/macclean/receipts")
+        .join(format!("{}.json", session_id)))
 }
 
 fn now_secs() -> u64 {

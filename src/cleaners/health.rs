@@ -113,6 +113,25 @@ pub fn snapshot() -> HealthSnapshot {
         .to_string();
 
     // ── Top space users in home ───────────────────────────────────────────────
+    let top_space = top_space_users();
+
+    HealthSnapshot {
+        disk_total,
+        disk_used,
+        disk_free,
+        mem_total,
+        mem_used,
+        ncpu,
+        load_avg,
+        battery,
+        filevault: filevault_status(),
+        firewall: firewall_status(),
+        sip: sip_status(),
+        top_space,
+    }
+}
+
+fn top_space_users() -> Vec<(String, u64)> {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let targets = [
         ("Gradle", ".gradle/caches"),
@@ -133,21 +152,7 @@ pub fn snapshot() -> HealthSnapshot {
         .collect();
     top_space.sort_by_key(|(_, s)| std::cmp::Reverse(*s));
     top_space.truncate(6);
-
-    HealthSnapshot {
-        disk_total,
-        disk_used,
-        disk_free,
-        mem_total,
-        mem_used,
-        ncpu,
-        load_avg,
-        battery,
-        filevault: filevault_status(),
-        firewall: firewall_status(),
-        sip: sip_status(),
-        top_space,
-    }
+    top_space
 }
 
 pub fn run() -> Result<()> {

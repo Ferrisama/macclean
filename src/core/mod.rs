@@ -5,6 +5,7 @@ pub mod plan;
 pub mod plist;
 pub mod profile;
 pub mod safety;
+pub mod storage;
 pub mod trash;
 
 use serde::{Deserialize, Serialize};

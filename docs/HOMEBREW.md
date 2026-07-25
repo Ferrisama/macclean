@@ -34,12 +34,12 @@ sudo mv macclean /usr/local/bin/
 1. Bump `version` in `Cargo.toml`.
 2. Commit and tag: `git tag v0.4.0 && git push --tags`.
 3. The `Release` GitHub Actions workflow builds `aarch64-apple-darwin` and
-   `x86_64-apple-darwin` binaries and attaches them to a GitHub Release
-   automatically on tag push.
-4. Update `Formula/macclean.rb`:
-   - Update `url` to the new tag's source tarball
-     (`https://github.com/Ferrisama/macclean/archive/refs/tags/vX.Y.Z.tar.gz`)
-   - Update `sha256`: `curl -sL <url> | shasum -a 256`
+   `x86_64-apple-darwin` binaries, checksum files, and attaches them to a
+   GitHub Release automatically on tag push.
+4. Update `Formula/macclean.rb`: `scripts/update-homebrew-formula.sh 0.4.0`
+
+See [`docs/RELEASE.md`](RELEASE.md) for local artifact builds, signing, and
+notarization.
 
 ## Setting up the Homebrew tap (one-time)
 

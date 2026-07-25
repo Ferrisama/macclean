@@ -22,9 +22,12 @@ macclean quick         # trash + browser + crash reports
 macclean dev           # brew + docker + node/pip/cargo + xcode + projects + zsh
 macclean deep          # everything
 macclean health        # one-page system snapshot
+macclean doctor        # verify permissions, tools, Trash, and release readiness
 macclean system-data   # explain why System Data/storage is large
-macclean system-data --path ~/Library --depth 2 --limit 8
-macclean history       # recent Trash-backed cleanup sessions
+macclean system-data --json
+macclean system-data --path ~/Library --depth 2 --limit 8 --deep
+macclean scan ~/Library --json --depth 1
+macclean history       # cleanup sessions, receipt paths, restore availability
 macclean restore       # restore the latest Trash-backed cleanup session
 macclean projects --path ~/code --only node --older-than-days 30
 macclean uninstall --path /Applications/Foo.app --deep
@@ -42,18 +45,19 @@ Every command above also works non-interactively for scripting -- the dashboard 
 
 ## Dashboard
 
-Running `macclean` with no arguments opens a full-screen dashboard with four tabs. `Tab`/`Shift+Tab` (or click) switches between them; `Ctrl+C` quits from anywhere.
+Running `macclean` with no arguments opens a full-screen dashboard with five tabs. `Tab`/`Shift+Tab` (or click) switches between them; `Ctrl+C` quits from anywhere.
 
 | Tab | What it does |
 |---|---|
 | **Dashboard** | Live disk/memory gauges, CPU/load/battery, FileVault/Firewall/SIP status, biggest space users in home. `r` to refresh. |
+| **System Data** | Fast visual bucket map for System Data with category shares, sizes, partial-scan warnings, and cleanup actions. `r` to rescan. |
 | **Clean** | The highest-value cache categories with sizes, checkboxes, and `1`/`2`/`3` for Quick/Dev/Deep presets. `Space` toggles, `Enter` runs the selected ones. |
 | **Uninstall** | Search installed apps, review every associated file (settings, caches, containers) before confirming. |
-| **Explore** | Drill-down disk usage browser -- `Enter` opens a folder, `Backspace`/`u` goes up, `d` trashes the selected item on the spot. |
+| **Explore** | Bounded drill-down disk usage browser with parent percentages, partial markers, and Trash-backed delete. `Enter` opens, `Backspace`/`u` goes up, `d` trashes. |
 
 Analyzing, scanning, and building an uninstall plan all run in the background, so switching tabs or typing is never blocked waiting on a scan to finish.
 
-`macclean` shows each cleanup item's type, risk, and reason before removal. User-data-adjacent cleanups such as app leftovers, project artifacts, installers, iOS backups, duplicate fonts, Xcode data, and ZSH completion files move items to the macOS Trash and are recorded in cleanup history. Cache/log cleaners delete immediately and permanently where moving cache contents to Trash would not free space until Trash is emptied.
+`macclean` shows each cleanup item's type, risk, and reason before removal. User-data-adjacent cleanups such as app leftovers, project artifacts, installers, iOS backups, duplicate fonts, Xcode data, and ZSH completion files move items to the macOS Trash and are recorded in cleanup history with JSON receipts under `~/Library/Application Support/macclean/receipts/`. Cache/log cleaners delete immediately and permanently where moving cache contents to Trash would not free space until Trash is emptied.
 
 ---
 
@@ -95,9 +99,11 @@ Analyzing, scanning, and building an uninstall plan all run in the background, s
 | Command | What it shows |
 |---|---|
 | `macclean health` | CPU, memory, disk, battery, security at a glance |
+| `macclean doctor` | Permission/tool readiness checks for Full Disk Access, Trash, Homebrew, Docker, Xcode, Time Machine, and signing |
+| `macclean scan <path>` | Chart-ready folder tree scan (`--json`, `--depth`, `--limit`, `--deep`) |
 | `macclean largest` | Biggest files on disk (`--min-mb 500`) |
 | `macclean dupes` | Duplicate files by content hash (`--min 10`) |
-| `macclean system-data` | Categorized System Data estimate and storage tree (`--path`, `--depth`, `--limit`) |
+| `macclean system-data` | Categorized System Data estimate and storage tree (`--json`, `--path`, `--depth`, `--limit`, `--deep`) |
 | `macclean ask "<request>"` | Offline natural-language command router; shows the planned command before running |
 | `macclean outdated` | Outdated brew/pip/npm packages |
 | `macclean wifi` | Wi-Fi signal, channel, DNS |
@@ -121,8 +127,8 @@ Analyzing, scanning, and building an uninstall plan all run in the background, s
 | `macclean uninstall --path /Applications/Foo.app --deep` | Deep app uninstall scan including helpers, receipts, group containers, launch items |
 | `macclean update` | Upgrade brew + pip + npm packages |
 | `macclean quit-apps` | Quit configured apps before sleep/travel |
-| `macclean history` | Show recent Trash-backed cleanup records |
-| `macclean restore [session]` | Restore the latest or named Trash-backed cleanup session when items still exist in Trash |
+| `macclean history` | Show recent Trash-backed cleanup sessions, receipt paths, and restore availability |
+| `macclean restore [session]` | Restore the latest or named Trash-backed cleanup session with per-item restore results |
 | `macclean plan create <name> <paths...>` | Save exact preselected paths as a fast reusable Trash-backed plan |
 | `macclean plan apply <name>` | Validate and apply a saved plan |
 | `macclean profile create-project <name>` | Save reusable project-cleanup rules |
@@ -138,9 +144,13 @@ macclean --yes deep         # skip all confirmations
 macclean -n projects --path ~/code --only node,python --exclude ~/code/client --older-than-days 30
 macclean -n uninstall --bundle-id com.example.App --deep
 macclean dupes --path ~/Downloads --trash --keep shortest
+macclean scan ~/Library --json --depth 1 --limit 12
+macclean system-data --json
 macclean -n plan apply downloads
 macclean profile create-project dev-safe --path ~/code --only node,python --exclude ~/code/client --older-than-days 30
 ```
+
+Storage scans run in fast mode by default with a short time budget and may mark results as `partial`. Add `--deep` for exact slower scans. Latest chart-ready scan JSON is cached under `~/Library/Application Support/macclean/scans/`.
 
 ---
 
@@ -157,6 +167,9 @@ cp target/release/macclean /usr/local/bin/
 brew tap Ferrisama/macclean
 brew install macclean
 ```
+
+Maintainer release, signing, notarization, and Homebrew formula steps are in
+[`docs/RELEASE.md`](docs/RELEASE.md).
 
 ---
 

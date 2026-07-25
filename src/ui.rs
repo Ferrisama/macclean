@@ -62,6 +62,38 @@ pub fn print_history(limit: usize) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let summaries = crate::core::history::session_summaries()?;
+    let mut session_table = Table::new();
+    session_table.load_preset(UTF8_BORDERS_ONLY);
+    session_table.set_header(vec![
+        "Session",
+        "Cleaner",
+        "Items",
+        "Total",
+        "Method",
+        "Restorable",
+        "Receipt",
+    ]);
+    for summary in summaries.into_iter().take(limit) {
+        let receipt = crate::core::history::receipt_path(&summary.session_id)
+            .ok()
+            .filter(|path| path.exists())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".into());
+        session_table.add_row(vec![
+            summary.session_id,
+            summary.cleaner,
+            summary.item_count.to_string(),
+            format_size(summary.total_bytes),
+            summary.method,
+            format!("{}/{}", summary.restorable_count, summary.item_count),
+            receipt,
+        ]);
+    }
+
+    println!("\n{}", "[ Cleanup Sessions ]".cyan().bold());
+    println!("{}", session_table);
+
     let mut table = Table::new();
     table.load_preset(UTF8_BORDERS_ONLY);
     table.set_header(vec![
@@ -70,24 +102,55 @@ pub fn print_history(limit: usize) -> anyhow::Result<()> {
         "Item",
         "Size",
         "Method",
+        "Restore",
         "Original Path",
     ]);
     for record in records.into_iter().take(limit) {
+        let restore = record.restore_state().label().to_string();
         table.add_row(vec![
             record.session_id,
             record.cleaner,
             record.label,
             format_size(record.size_bytes),
             record.method,
+            restore,
             record.original_path.display().to_string(),
         ]);
     }
 
-    println!("\n{}", "[ Cleanup History ]".cyan().bold());
+    println!("\n{}", "[ Recent Cleanup Items ]".cyan().bold());
     println!("{}", table);
     println!("  Restore latest: macclean restore");
     println!("  Restore session: macclean restore <session>");
     Ok(())
+}
+
+pub fn print_restore_outcomes(outcomes: &[crate::core::history::RestoreOutcome]) {
+    let mut table = Table::new();
+    table.load_preset(UTF8_BORDERS_ONLY);
+    table.set_header(vec!["Item", "Size", "Status", "Original Path"]);
+
+    for outcome in outcomes {
+        let status = if outcome.restored {
+            "restored".green().to_string()
+        } else {
+            format!(
+                "failed: {}",
+                outcome.error.as_deref().unwrap_or("unknown error")
+            )
+            .yellow()
+            .to_string()
+        };
+        table.add_row(vec![
+            outcome.record.label.clone(),
+            format_size(outcome.record.size_bytes),
+            status,
+            outcome.record.original_path.display().to_string(),
+        ]);
+    }
+
+    println!("\n{}", "[ Restore Result ]".cyan().bold());
+    println!("{}", table);
 }
 
 pub fn print_plan(plan: &crate::core::plan::StoredPlan) {

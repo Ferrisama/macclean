@@ -8,10 +8,12 @@ use ratatui::layout::{Position, Rect};
 
 use crate::cleaners::{self, health::HealthSnapshot, uninstall};
 use crate::core::cmd::is_root;
+use crate::core::storage::{self, ScanMode, SystemDataScan};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Dashboard,
+    SystemData,
     Clean,
     Uninstall,
     Explore,
@@ -39,8 +41,11 @@ pub enum Action {
 /// every tick and applies them to state; the main thread never blocks on
 /// filesystem or subprocess work outside of `run_selected_clean`.
 pub enum BgEvent {
+    DashboardRefreshed(HealthSnapshot),
     CleanSize(usize, Option<u64>),
     CleanAnalyzeDone,
+    SystemDataScanned(SystemDataScan),
+    UninstallAppsLoaded(Vec<(String, PathBuf)>),
     UninstallPlanReady(Result<uninstall::UninstallPlan, String>),
     UninstallExecuted {
         app_name: String,
@@ -59,7 +64,9 @@ pub struct ExploreEntry {
     pub path: PathBuf,
     pub name: String,
     pub size: u64,
+    pub percent: f64,
     pub is_dir: bool,
+    pub partial: bool,
 }
 
 pub struct CleanCategory {
@@ -120,6 +127,12 @@ pub struct App {
 
     // Dashboard
     pub health: Option<HealthSnapshot>,
+    pub health_loading: bool,
+
+    // System Data
+    pub system_data: Option<SystemDataScan>,
+    pub system_data_loading: bool,
+    pub system_data_scanned: bool,
 
     // Clean
     pub clean_categories: Vec<CleanCategory>,
@@ -146,7 +159,7 @@ pub struct App {
 
     // Layout hit-testing, recorded each draw so mouse clicks can be mapped
     // back to what's on screen.
-    pub tab_rects: [Rect; 4],
+    pub tab_rects: [Rect; 5],
     pub clean_row_rects: Vec<Rect>,
     pub uninstall_row_rects: Vec<(Rect, usize)>,
     pub explore_row_rects: Vec<Rect>,
@@ -180,11 +193,15 @@ impl App {
             bg_tx,
             bg_rx,
             health: None,
+            health_loading: false,
+            system_data: None,
+            system_data_loading: false,
+            system_data_scanned: false,
             clean_categories,
             clean_cursor: 0,
             clean_analyzed: false,
             clean_loading: false,
-            uninstall_apps: uninstall::list_installed_apps(),
+            uninstall_apps: Vec::new(),
             uninstall_filter: String::new(),
             uninstall_cursor: 0,
             uninstall_screen: UninstallScreen::List,
@@ -197,7 +214,7 @@ impl App {
             explore_scanned: false,
             explore_loading: false,
             explore_confirm_delete: None,
-            tab_rects: [Rect::default(); 4],
+            tab_rects: [Rect::default(); 5],
             clean_row_rects: Vec::new(),
             uninstall_row_rects: Vec::new(),
             explore_row_rects: Vec::new(),
@@ -211,6 +228,11 @@ impl App {
     pub fn poll_bg(&mut self) {
         while let Ok(event) = self.bg_rx.try_recv() {
             match event {
+                BgEvent::DashboardRefreshed(snapshot) => {
+                    self.health_loading = false;
+                    self.health = Some(snapshot);
+                    self.status.clear();
+                }
                 BgEvent::CleanSize(i, size) => {
                     if let Some(cat) = self.clean_categories.get_mut(i) {
                         cat.size = size;
@@ -220,6 +242,18 @@ impl App {
                     self.clean_loading = false;
                     self.clean_analyzed = true;
                     self.status = "Ready.".to_string();
+                }
+                BgEvent::SystemDataScanned(scan) => {
+                    self.system_data_loading = false;
+                    self.system_data_scanned = true;
+                    self.system_data = Some(scan);
+                    self.status.clear();
+                }
+                BgEvent::UninstallAppsLoaded(apps) => {
+                    self.uninstall_loading = false;
+                    self.uninstall_apps = apps;
+                    self.uninstall_cursor = 0;
+                    self.status.clear();
                 }
                 BgEvent::UninstallPlanReady(result) => {
                     self.uninstall_loading = false;
@@ -277,7 +311,16 @@ impl App {
     }
 
     pub fn refresh_dashboard(&mut self) {
-        self.health = Some(cleaners::health::snapshot());
+        if self.health_loading {
+            return;
+        }
+        self.health_loading = true;
+        self.status = "Refreshing dashboard details...".to_string();
+        let tx = self.bg_tx.clone();
+        thread::spawn(move || {
+            let snapshot = cleaners::health::snapshot();
+            let _ = tx.send(BgEvent::DashboardRefreshed(snapshot));
+        });
     }
 
     pub fn filtered_uninstall(&self) -> Vec<usize> {
@@ -292,8 +335,14 @@ impl App {
 
     fn switch_tab(&mut self, tab: Tab) {
         self.tab = tab;
+        if tab == Tab::SystemData && !self.system_data_scanned {
+            self.start_system_data_scan();
+        }
         if tab == Tab::Clean && !self.clean_analyzed {
             self.start_analyze_clean();
+        }
+        if tab == Tab::Uninstall && self.uninstall_apps.is_empty() && !self.uninstall_loading {
+            self.start_load_uninstall_apps();
         }
         if tab == Tab::Explore && !self.explore_scanned {
             self.start_explore_scan();
@@ -302,7 +351,8 @@ impl App {
 
     fn next_tab_variant(&self) -> Tab {
         match self.tab {
-            Tab::Dashboard => Tab::Clean,
+            Tab::Dashboard => Tab::SystemData,
+            Tab::SystemData => Tab::Clean,
             Tab::Clean => Tab::Uninstall,
             Tab::Uninstall => Tab::Explore,
             Tab::Explore => Tab::Dashboard,
@@ -312,7 +362,8 @@ impl App {
     fn prev_tab_variant(&self) -> Tab {
         match self.tab {
             Tab::Dashboard => Tab::Explore,
-            Tab::Clean => Tab::Dashboard,
+            Tab::SystemData => Tab::Dashboard,
+            Tab::Clean => Tab::SystemData,
             Tab::Uninstall => Tab::Clean,
             Tab::Explore => Tab::Uninstall,
         }
@@ -337,6 +388,7 @@ impl App {
 
         match self.tab {
             Tab::Dashboard => self.on_key_dashboard(key),
+            Tab::SystemData => self.on_key_system_data(key),
             Tab::Clean => self.on_key_clean(key),
             Tab::Uninstall => self.on_key_uninstall(key),
             Tab::Explore => self.on_key_explore(key),
@@ -350,6 +402,29 @@ impl App {
             _ => {}
         }
         Action::None
+    }
+
+    fn on_key_system_data(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('r') | KeyCode::Char('R') => self.start_system_data_scan(),
+            _ => {}
+        }
+        Action::None
+    }
+
+    fn start_system_data_scan(&mut self) {
+        if self.system_data_loading {
+            return;
+        }
+        self.system_data_loading = true;
+        self.status = "Scanning System Data buckets...".to_string();
+        let tx = self.bg_tx.clone();
+        thread::spawn(move || {
+            let scan = storage::scan_system_data(ScanMode::Fast);
+            let _ = storage::write_system_data_cache(&scan);
+            let _ = tx.send(BgEvent::SystemDataScanned(scan));
+        });
     }
 
     fn apply_preset(&mut self, keys: &[&str]) {
@@ -467,10 +542,23 @@ impl App {
     }
 
     fn on_key_uninstall(&mut self, key: KeyEvent) -> Action {
+        if self.uninstall_apps.is_empty() && !self.uninstall_loading {
+            self.start_load_uninstall_apps();
+        }
         match self.uninstall_screen {
             UninstallScreen::List => self.on_key_uninstall_list(key),
             UninstallScreen::Reviewing => self.on_key_uninstall_review(key),
         }
+    }
+
+    fn start_load_uninstall_apps(&mut self) {
+        self.uninstall_loading = true;
+        self.status = "Loading installed apps...".to_string();
+        let tx = self.bg_tx.clone();
+        thread::spawn(move || {
+            let apps = uninstall::list_installed_apps();
+            let _ = tx.send(BgEvent::UninstallAppsLoaded(apps));
+        });
     }
 
     fn on_key_uninstall_list(&mut self, key: KeyEvent) -> Action {
@@ -622,26 +710,24 @@ impl App {
         let dir = self.explore_dir.clone();
         let tx = self.bg_tx.clone();
         thread::spawn(move || {
-            let mut entries = Vec::new();
-            if let Ok(rd) = std::fs::read_dir(&dir) {
-                for entry in rd.filter_map(|e| e.ok()) {
-                    let path = entry.path();
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    let is_dir = path.is_dir() && !path.is_symlink();
-                    let size = if is_dir {
-                        crate::core::fs::dir_size(&path)
-                    } else {
-                        entry.metadata().map(|m| m.len()).unwrap_or(0)
-                    };
-                    entries.push(ExploreEntry {
-                        path,
-                        name,
-                        size,
-                        is_dir,
-                    });
-                }
-            }
-            entries.sort_by_key(|e| std::cmp::Reverse(e.size));
+            let mut entries = storage::scan_tree(dir.clone(), 1, 80, ScanMode::Fast)
+                .map(|scan| {
+                    let _ = storage::write_tree_cache(&scan);
+                    scan.tree
+                        .children
+                        .into_iter()
+                        .map(|node| ExploreEntry {
+                            path: node.path,
+                            name: node.name,
+                            size: node.size_bytes,
+                            percent: node.percent_of_parent,
+                            is_dir: node.is_dir,
+                            partial: node.partial,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            entries.sort_by_key(|entry| std::cmp::Reverse(entry.size));
             let _ = tx.send(BgEvent::ExploreScanned(dir, entries));
         });
     }
@@ -681,8 +767,9 @@ impl App {
             if rect.contains(point) {
                 let tab = match i {
                     0 => Tab::Dashboard,
-                    1 => Tab::Clean,
-                    2 => Tab::Uninstall,
+                    1 => Tab::SystemData,
+                    2 => Tab::Clean,
+                    3 => Tab::Uninstall,
                     _ => Tab::Explore,
                 };
                 self.switch_tab(tab);

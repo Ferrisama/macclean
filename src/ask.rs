@@ -122,8 +122,16 @@ pub fn resolve(phrase: &str) -> Option<AskAction> {
 
 fn execute(action: AskAction, dry_run: bool) -> Result<()> {
     match action {
-        AskAction::SystemData => cleaners::system_data::run(None, 2, 8),
-        AskAction::LibraryTree => cleaners::system_data::run(Some(home_path("Library")), 1, 8),
+        AskAction::SystemData => {
+            cleaners::system_data::run(None, 2, 8, crate::core::storage::ScanMode::Fast, false)
+        }
+        AskAction::LibraryTree => cleaners::system_data::run(
+            Some(home_path("Library")),
+            1,
+            8,
+            crate::core::storage::ScanMode::Fast,
+            false,
+        ),
         AskAction::OldNodeProjects => cleaners::projects::run(
             cleaners::projects::ProjectScanOptions {
                 root: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")),

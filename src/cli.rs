@@ -43,6 +43,10 @@ pub enum Commands {
         depth: usize,
         #[arg(long, default_value_t = 8usize)]
         limit: usize,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        deep: bool,
     },
     Browser,
     Stremio,
@@ -85,6 +89,19 @@ pub enum Commands {
     IosBackups,
     // Tools
     Health,
+    Doctor,
+    Scan {
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
+        #[arg(long, default_value_t = 1usize)]
+        depth: usize,
+        #[arg(long, default_value_t = 12usize)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        deep: bool,
+    },
     Largest {
         #[arg(long, default_value_t = 100u64)]
         min_mb: u64,
@@ -238,9 +255,13 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
 
         Commands::Trash => run_cleaner("trash", dry_run, yes),
         Commands::System => run_cleaner("system", dry_run, yes),
-        Commands::SystemData { path, depth, limit } => {
-            cleaners::system_data::run(path, depth, limit)
-        }
+        Commands::SystemData {
+            path,
+            depth,
+            limit,
+            json,
+            deep,
+        } => cleaners::system_data::run(path, depth, limit, scan_mode(deep), json),
         Commands::Browser => run_cleaner("browser", dry_run, yes),
         Commands::Stremio => run_cleaner("stremio", dry_run, yes),
         Commands::Apps => run_cleaner("apps", dry_run, yes),
@@ -298,6 +319,14 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
         Commands::IosBackups => run_cleaner("ios-backups", dry_run, yes),
 
         Commands::Health => cleaners::health::run(),
+        Commands::Doctor => crate::doctor::run(),
+        Commands::Scan {
+            path,
+            depth,
+            limit,
+            json,
+            deep,
+        } => run_storage_scan(path, depth, limit, json, deep),
         Commands::Largest {
             min_mb,
             limit,
@@ -335,7 +364,10 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
         Commands::Outdated => cleaners::outdated::run(),
         Commands::History { limit } => ui::print_history(limit),
         Commands::Restore { session } => {
-            let (restored, failed) = crate::core::history::restore_session(session.as_deref())?;
+            let outcomes = crate::core::history::restore_session_detailed(session.as_deref())?;
+            ui::print_restore_outcomes(&outcomes);
+            let restored = outcomes.iter().filter(|outcome| outcome.restored).count();
+            let failed = outcomes.len().saturating_sub(restored);
             ui::print_ok(&format!("Restored {} item(s)", restored));
             if failed > 0 {
                 ui::print_warn(&format!(
@@ -488,6 +520,31 @@ fn parse_risk(value: &str) -> crate::core::RiskLevel {
         "high" => crate::core::RiskLevel::High,
         _ => crate::core::RiskLevel::Medium,
     }
+}
+
+fn scan_mode(deep: bool) -> crate::core::storage::ScanMode {
+    if deep {
+        crate::core::storage::ScanMode::Deep
+    } else {
+        crate::core::storage::ScanMode::Fast
+    }
+}
+
+fn run_storage_scan(
+    path: std::path::PathBuf,
+    depth: usize,
+    limit: usize,
+    json: bool,
+    deep: bool,
+) -> Result<()> {
+    if json {
+        let scan = crate::core::storage::scan_tree(path, depth, limit, scan_mode(deep))?;
+        let _ = crate::core::storage::write_tree_cache(&scan);
+        println!("{}", serde_json::to_string_pretty(&scan)?);
+    } else {
+        cleaners::system_data::run(Some(path), depth, limit, scan_mode(deep), false)?;
+    }
+    Ok(())
 }
 
 fn run_preset(name: &str, dry_run: bool, yes: bool) -> Result<()> {

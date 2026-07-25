@@ -2,8 +2,8 @@ class Macclean < Formula
   desc "Mac system maintenance CLI -- clean, analyze, secure, monitor"
   homepage "https://github.com/Ferrisama/macclean"
   url "https://github.com/Ferrisama/macclean/archive/refs/tags/v0.3.0.tar.gz"
-  # Update sha256 after tagging release:
-  # curl -sL <url> | shasum -a 256
+  # Update after tagging release:
+  # scripts/update-homebrew-formula.sh 0.3.0
   sha256 "FILL_IN_AFTER_RELEASE_TAG"
   license "MIT"
   head "https://github.com/Ferrisama/macclean.git", branch: "master"

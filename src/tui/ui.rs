@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use ratatui::Frame;
 
 use super::app::{App, Tab, UninstallScreen};
+use crate::core::storage::StorageCategory;
 use crate::ui::format_size;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -20,6 +21,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_tab_bar(frame, app, chunks[0]);
     match app.tab {
         Tab::Dashboard => draw_dashboard(frame, app, chunks[1]),
+        Tab::SystemData => draw_system_data(frame, app, chunks[1]),
         Tab::Clean => draw_clean(frame, app, chunks[1]),
         Tab::Uninstall => draw_uninstall(frame, app, chunks[1]),
         Tab::Explore => draw_explore(frame, app, chunks[1]),
@@ -28,10 +30,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_tab_bar(frame: &mut Frame, app: &mut App, area: Rect) {
-    let titles = ["Dashboard", "Clean", "Uninstall", "Explore"];
+    let titles = ["Dashboard", "System Data", "Clean", "Uninstall", "Explore"];
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Ratio(1, 4); 4])
+        .constraints([Constraint::Ratio(1, 5); 5])
         .split(area);
 
     for (i, title) in titles.iter().enumerate() {
@@ -53,6 +55,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let help = match app.tab {
         Tab::Dashboard => "r: refresh   Tab: switch panel   Ctrl+C: quit",
+        Tab::SystemData => "r: rescan   Tab: switch panel   Ctrl+C: quit",
         Tab::Clean => {
             "Space: toggle  a: all  n: none  1/2/3: quick/dev/deep preset  Enter: run  R: re-analyze  Tab: switch panel"
         }
@@ -182,6 +185,184 @@ fn draw_dashboard(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(space_lines).block(Block::bordered().title("Top Space Users (Home)")),
         bottom[1],
     );
+}
+
+fn draw_system_data(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(scan) = &app.system_data else {
+        let msg = if app.system_data_loading {
+            "Scanning System Data buckets..."
+        } else {
+            "Press r to scan System Data buckets."
+        };
+        frame.render_widget(
+            Paragraph::new(msg)
+                .style(Style::new().fg(Color::DarkGray))
+                .block(Block::bordered().title("System Data")),
+            area,
+        );
+        return;
+    };
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    let summary = vec![
+        Line::from(vec![
+            Span::styled("Known buckets: ", Style::new().fg(Color::DarkGray)),
+            Span::styled(format_size(scan.total_bytes), Style::new().bold()),
+            Span::raw(format!("   Scan: {} ms", scan.elapsed_ms)),
+        ]),
+        Line::from(if scan.partial {
+            Span::styled(
+                "Fast scan hit its budget; numbers are partial. Use `macclean system-data --deep --json` for exact chart data.",
+                Style::new().fg(Color::Yellow),
+            )
+        } else {
+            Span::styled(
+                "Exact enough for this fast pass.",
+                Style::new().fg(Color::Green),
+            )
+        }),
+        Line::from(""),
+    ];
+    frame.render_widget(
+        Paragraph::new(summary).block(Block::bordered().title("System Data Summary")),
+        rows[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from("Share"),
+            category_share_line(&scan.categories, 44),
+        ])
+        .block(Block::bordered().title("Category Mix")),
+        rows[1],
+    );
+
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(rows[2]);
+
+    draw_system_data_categories(frame, &scan.categories, bottom[0]);
+    draw_system_data_actions(frame, &scan.categories, bottom[1]);
+}
+
+fn draw_system_data_categories(frame: &mut Frame, categories: &[StorageCategory], area: Rect) {
+    let block = Block::bordered().title("Buckets");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let visible = inner.height as usize;
+    for (i, category) in categories
+        .iter()
+        .filter(|category| category.size_bytes > 0)
+        .take(visible)
+        .enumerate()
+    {
+        let rect = Rect {
+            x: inner.x,
+            y: inner.y + i as u16,
+            width: inner.width,
+            height: 1,
+        };
+        let name_width = (inner.width as usize).saturating_sub(34).max(10);
+        let line = Line::from(vec![
+            Span::styled(
+                format!(
+                    "{:<name_width$}",
+                    truncate(&category.name, name_width),
+                    name_width = name_width
+                ),
+                Style::new().fg(category_color(i)),
+            ),
+            Span::raw(format!(" {:>9}", format_size(category.size_bytes))),
+            Span::raw(format!(" {:>5.1}% ", category.percent_of_total)),
+            Span::styled(
+                percent_bar(category.percent_of_total, 12),
+                Style::new().fg(category_color(i)),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(line), rect);
+    }
+}
+
+fn draw_system_data_actions(frame: &mut Frame, categories: &[StorageCategory], area: Rect) {
+    let lines: Vec<Line> = categories
+        .iter()
+        .filter(|category| category.size_bytes > 0)
+        .take(area.height as usize)
+        .map(|category| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<18}", truncate(&category.name, 18)),
+                    Style::new().fg(Color::Cyan),
+                ),
+                Span::raw(truncate(
+                    &category.clean_with,
+                    area.width.saturating_sub(20) as usize,
+                )),
+            ])
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title("Actions")),
+        area,
+    );
+}
+
+fn category_share_line(categories: &[StorageCategory], width: usize) -> Line<'static> {
+    let mut spans = Vec::new();
+    let nonzero: Vec<_> = categories
+        .iter()
+        .filter(|category| category.size_bytes > 0)
+        .collect();
+    if nonzero.is_empty() {
+        return Line::from("No category sizes found.");
+    }
+
+    let mut used = 0usize;
+    for (i, category) in nonzero.iter().take(8).enumerate() {
+        let mut cells = ((category.percent_of_total / 100.0) * width as f64).round() as usize;
+        if category.percent_of_total > 0.0 {
+            cells = cells.max(1);
+        }
+        cells = cells.min(width.saturating_sub(used));
+        if cells == 0 {
+            continue;
+        }
+        used += cells;
+        spans.push(Span::styled(
+            "█".repeat(cells),
+            Style::new().fg(category_color(i)),
+        ));
+    }
+    if used < width {
+        spans.push(Span::styled(
+            "░".repeat(width - used),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn category_color(index: usize) -> Color {
+    match index % 8 {
+        0 => Color::Cyan,
+        1 => Color::Green,
+        2 => Color::Yellow,
+        3 => Color::Magenta,
+        4 => Color::Blue,
+        5 => Color::LightRed,
+        6 => Color::LightGreen,
+        _ => Color::LightCyan,
+    }
 }
 
 fn draw_clean(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -350,11 +531,14 @@ fn draw_uninstall_review(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn size_bar(size: u64, max: u64, width: usize) -> String {
-    if max == 0 {
-        return " ".repeat(width);
+fn percent_bar(percent: f64, width: usize) -> String {
+    if width == 0 {
+        return String::new();
     }
-    let filled = (((size as f64 / max as f64) * width as f64).round() as usize).min(width);
+    if percent <= 0.0 {
+        return "░".repeat(width);
+    }
+    let filled = (((percent / 100.0) * width as f64).round() as usize).clamp(1, width);
     format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
 }
 
@@ -395,7 +579,22 @@ fn draw_explore(frame: &mut Frame, app: &mut App, area: Rect) {
         rows[0],
     );
 
-    let block = Block::bordered().title(format!("{} items", app.explore_entries.len()));
+    let total_size: u64 = app.explore_entries.iter().map(|entry| entry.size).sum();
+    let partial = app.explore_entries.iter().any(|entry| entry.partial);
+    let title = if partial {
+        format!(
+            "{} items  {} shown  partial",
+            app.explore_entries.len(),
+            format_size(total_size)
+        )
+    } else {
+        format!(
+            "{} items  {} shown",
+            app.explore_entries.len(),
+            format_size(total_size)
+        )
+    };
+    let block = Block::bordered().title(title);
     let inner = block.inner(rows[1]);
     frame.render_widget(block, rows[1]);
 
@@ -414,18 +613,11 @@ fn draw_explore(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let max_size = app
-        .explore_entries
-        .iter()
-        .map(|e| e.size)
-        .max()
-        .unwrap_or(1)
-        .max(1);
     let visible = inner.height as usize;
     let start = app.explore_cursor.saturating_sub(visible.saturating_sub(1));
     let bar_width = 24usize;
     let name_width = (inner.width as usize)
-        .saturating_sub(bar_width + 14)
+        .saturating_sub(bar_width + 23)
         .max(10);
 
     for (row_i, entry) in app
@@ -446,12 +638,15 @@ fn draw_explore(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let suffix = if entry.is_dir { "/" } else { "" };
         let name = truncate(&format!("{}{}", entry.name, suffix), name_width);
-        let bar = size_bar(entry.size, max_size, bar_width);
+        let bar = percent_bar(entry.percent, bar_width);
+        let partial = if entry.partial { " ~" } else { "  " };
         let line = format!(
-            "{:<name_width$} {} {:>10}",
+            "{:<name_width$} {:>5.1}% {} {:>10}{}",
             name,
+            entry.percent,
             bar,
             format_size(entry.size),
+            partial,
             name_width = name_width
         );
 
