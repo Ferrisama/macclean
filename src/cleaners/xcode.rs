@@ -1,14 +1,18 @@
-use std::path::PathBuf;
-use anyhow::Result;
-use crate::core::{AnalysisResult, Cleaner};
 use crate::core::fs::dir_size;
+use crate::core::{AnalysisResult, CleanKind, Cleaner, RiskLevel};
 use crate::ui;
+use anyhow::Result;
+use std::path::PathBuf;
 
 pub struct XcodeCleaner;
 
 impl Cleaner for XcodeCleaner {
-    fn name(&self) -> &str { "xcode" }
-    fn display_name(&self) -> &str { "Xcode" }
+    fn name(&self) -> &str {
+        "xcode"
+    }
+    fn display_name(&self) -> &str {
+        "Xcode"
+    }
 
     fn analyze(&self) -> Result<AnalysisResult> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -17,12 +21,34 @@ impl Cleaner for XcodeCleaner {
         let xcode_dirs = [
             ("Xcode DerivedData", "Library/Developer/Xcode/DerivedData"),
             ("Xcode Archives", "Library/Developer/Xcode/Archives"),
-            ("iOS DeviceSupport", "Library/Developer/Xcode/iOS DeviceSupport"),
-            ("watchOS DeviceSupport", "Library/Developer/Xcode/watchOS DeviceSupport"),
-            ("tvOS DeviceSupport", "Library/Developer/Xcode/tvOS DeviceSupport"),
-            ("visionOS DeviceSupport", "Library/Developer/Xcode/visionOS DeviceSupport"),
-            ("CoreSimulator Devices", "Library/Developer/CoreSimulator/Devices"),
-            ("CoreSimulator dyld Caches", "Library/Developer/CoreSimulator/Caches/dyld"),
+            (
+                "iOS DeviceSupport",
+                "Library/Developer/Xcode/iOS DeviceSupport",
+            ),
+            (
+                "watchOS DeviceSupport",
+                "Library/Developer/Xcode/watchOS DeviceSupport",
+            ),
+            (
+                "tvOS DeviceSupport",
+                "Library/Developer/Xcode/tvOS DeviceSupport",
+            ),
+            (
+                "visionOS DeviceSupport",
+                "Library/Developer/Xcode/visionOS DeviceSupport",
+            ),
+            (
+                "CoreDevice device filesystems",
+                "Library/Developer/CoreDevice/DeviceFS",
+            ),
+            (
+                "CoreSimulator Devices",
+                "Library/Developer/CoreSimulator/Devices",
+            ),
+            (
+                "CoreSimulator dyld Caches",
+                "Library/Developer/CoreSimulator/Caches/dyld",
+            ),
         ];
 
         for (label, rel) in &xcode_dirs {
@@ -30,7 +56,14 @@ impl Cleaner for XcodeCleaner {
             if path.exists() {
                 let size = dir_size(&path);
                 if size > 0 {
-                    result.add(*label, path, size);
+                    result.add_with_meta(
+                        *label,
+                        path,
+                        size,
+                        CleanKind::DevArtifact,
+                        RiskLevel::Medium,
+                        "Xcode-generated data; can be recreated by Xcode, simulators, or devices.",
+                    );
                 }
             }
         }
@@ -44,16 +77,18 @@ impl Cleaner for XcodeCleaner {
             return Ok(());
         }
         ui::print_analysis("Xcode", &result.items);
-        if dry_run { return Ok(()); }
-        if !yes && !ui::confirm("Clear selected Xcode data?", false)? { return Ok(()); }
+        if dry_run {
+            return Ok(());
+        }
+        if !yes && !ui::confirm("Clear selected Xcode data? Simulators and device support files can be recreated by Xcode.", false)? { return Ok(()); }
 
-        for item in &result.items {
-            match std::fs::remove_dir_all(&item.path) {
+        for (path, outcome) in crate::core::trash::trash_clean_items("xcode", &result.items) {
+            match outcome {
                 Ok(_) => {
-                    std::fs::create_dir_all(&item.path).ok();
-                    ui::print_ok(&format!("Cleared {}", item.label));
+                    std::fs::create_dir_all(&path).ok();
+                    ui::print_ok(&format!("Moved to Trash: {}", path.display()));
                 }
-                Err(e) => ui::print_warn(&format!("{}: {}", item.label, e)),
+                Err(e) => ui::print_warn(&format!("{}: {}", path.display(), e)),
             }
         }
         Ok(())

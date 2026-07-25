@@ -1,15 +1,19 @@
-use std::path::PathBuf;
-use anyhow::Result;
-use crate::core::{AnalysisResult, Cleaner, CleanItem};
-use crate::core::fs::dir_size;
 use crate::core::cmd::run_cmd;
+use crate::core::fs::dir_size;
+use crate::core::{AnalysisResult, CleanItem, CleanKind, Cleaner, RiskLevel};
 use crate::ui;
+use anyhow::Result;
+use std::path::PathBuf;
 
 pub struct PythonVersionsCleaner;
 
 impl Cleaner for PythonVersionsCleaner {
-    fn name(&self) -> &str { "python" }
-    fn display_name(&self) -> &str { "Python Versions (pyenv)" }
+    fn name(&self) -> &str {
+        "python"
+    }
+    fn display_name(&self) -> &str {
+        "Python Versions (pyenv)"
+    }
 
     fn analyze(&self) -> Result<AnalysisResult> {
         let mut result = AnalysisResult::default();
@@ -44,7 +48,9 @@ impl Cleaner for PythonVersionsCleaner {
 
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
-            if !path.is_dir() { continue; }
+            if !path.is_dir() {
+                continue;
+            }
 
             let version_name = path
                 .file_name()
@@ -61,8 +67,12 @@ impl Cleaner for PythonVersionsCleaner {
                     .unwrap_or(false);
 
             let mut label = version_name.clone();
-            if is_active { label.push_str(" [active]"); }
-            if has_envs { label.push_str(" [has virtualenvs]"); }
+            if is_active {
+                label.push_str(" [active]");
+            }
+            if has_envs {
+                label.push_str(" [has virtualenvs]");
+            }
 
             let removable = !is_active && !has_envs;
             let size = dir_size(&path);
@@ -72,6 +82,18 @@ impl Cleaner for PythonVersionsCleaner {
                 path,
                 size_bytes: size,
                 removable,
+                kind: CleanKind::DevArtifact,
+                risk: if removable {
+                    RiskLevel::Medium
+                } else {
+                    RiskLevel::High
+                },
+                reason: if removable {
+                    "pyenv version is not active and has no virtualenvs."
+                } else {
+                    "Protected because it is active or has virtualenvs."
+                }
+                .into(),
             });
         }
 
@@ -92,26 +114,31 @@ impl Cleaner for PythonVersionsCleaner {
             return Ok(());
         }
 
-        if dry_run { return Ok(()); }
-        if !yes && !ui::confirm(
-            &format!("Uninstall {} unused Python version(s)?", removable.len()),
-            false,
-        )? {
+        if dry_run {
+            return Ok(());
+        }
+        if !yes
+            && !ui::confirm(
+                &format!("Uninstall {} unused Python version(s)?", removable.len()),
+                false,
+            )?
+        {
             return Ok(());
         }
 
         for item in &removable {
             // Extract the plain version name (strip any suffix tags we added)
-            let version_name = item.label
-                .split_whitespace()
-                .next()
-                .unwrap_or(&item.label);
+            let version_name = item.label.split_whitespace().next().unwrap_or(&item.label);
 
             let r = run_cmd(&["pyenv", "uninstall", "-f", version_name]);
             if r.success() {
                 ui::print_ok(&format!("Uninstalled Python {}", version_name));
             } else {
-                ui::print_warn(&format!("{}: {}", version_name, &r.output[..r.output.len().min(200)]));
+                ui::print_warn(&format!(
+                    "{}: {}",
+                    version_name,
+                    &r.output[..r.output.len().min(200)]
+                ));
             }
         }
         Ok(())

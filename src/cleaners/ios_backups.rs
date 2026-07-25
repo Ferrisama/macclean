@@ -1,14 +1,18 @@
-use std::path::PathBuf;
-use anyhow::Result;
-use crate::core::{AnalysisResult, Cleaner};
 use crate::core::fs::dir_size;
+use crate::core::{AnalysisResult, CleanKind, Cleaner, RiskLevel};
 use crate::ui;
+use anyhow::Result;
+use std::path::PathBuf;
 
 pub struct IosBackupsCleaner;
 
 impl Cleaner for IosBackupsCleaner {
-    fn name(&self) -> &str { "ios-backups" }
-    fn display_name(&self) -> &str { "iOS Backups" }
+    fn name(&self) -> &str {
+        "ios-backups"
+    }
+    fn display_name(&self) -> &str {
+        "iOS Backups"
+    }
 
     fn analyze(&self) -> Result<AnalysisResult> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -26,18 +30,26 @@ impl Cleaner for IosBackupsCleaner {
 
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
-            if !path.is_dir() { continue; }
+            if !path.is_dir() {
+                continue;
+            }
 
             // Try to get a friendly name from Info.plist; fall back to dir name
-            let label = try_read_device_name(&path)
-                .unwrap_or_else(|| {
-                    path.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "Unknown Backup".to_string())
-                });
+            let label = try_read_device_name(&path).unwrap_or_else(|| {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Unknown Backup".to_string())
+            });
 
             let size = dir_size(&path);
-            result.add(label, path, size);
+            result.add_with_meta(
+                label,
+                path,
+                size,
+                CleanKind::Backup,
+                RiskLevel::High,
+                "Local iPhone/iPad backup copy; deleting can remove the only local restore point.",
+            );
         }
 
         Ok(result)
@@ -50,13 +62,17 @@ impl Cleaner for IosBackupsCleaner {
         }
         ui::print_analysis("iOS Backups", &result.items);
         ui::print_warn("Deleting removes only the local backup copy.");
-        if dry_run { return Ok(()); }
-        if !yes && !ui::confirm("Delete all listed backups?", false)? { return Ok(()); }
+        if dry_run {
+            return Ok(());
+        }
+        if !yes && !ui::confirm("Delete all listed backups?", false)? {
+            return Ok(());
+        }
 
-        for item in &result.items {
-            match std::fs::remove_dir_all(&item.path) {
-                Ok(_) => ui::print_ok(&format!("Deleted backup: {}", item.label)),
-                Err(e) => ui::print_warn(&format!("{}: {}", item.label, e)),
+        for (path, outcome) in crate::core::trash::trash_clean_items("ios-backups", &result.items) {
+            match outcome {
+                Ok(_) => ui::print_ok(&format!("Moved backup to Trash: {}", path.display())),
+                Err(e) => ui::print_warn(&format!("{}: {}", path.display(), e)),
             }
         }
         Ok(())
@@ -81,7 +97,13 @@ fn try_read_device_name(backup_dir: &std::path::Path) -> Option<String> {
 
     let string_start = after_key.find("<string>")? + "<string>".len();
     let string_end = after_key[string_start..].find("</string>")?;
-    let device_name = after_key[string_start..string_start + string_end].trim().to_string();
+    let device_name = after_key[string_start..string_start + string_end]
+        .trim()
+        .to_string();
 
-    if device_name.is_empty() { None } else { Some(device_name) }
+    if device_name.is_empty() {
+        None
+    } else {
+        Some(device_name)
+    }
 }

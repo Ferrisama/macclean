@@ -1,13 +1,17 @@
-use anyhow::Result;
+use crate::core::cmd::{require_sudo, run_cmd};
 use crate::core::{AnalysisResult, Cleaner};
-use crate::core::cmd::{run_cmd, require_sudo};
 use crate::ui;
+use anyhow::Result;
 
 pub struct MemoryCleaner;
 
 impl Cleaner for MemoryCleaner {
-    fn name(&self) -> &str { "memory" }
-    fn display_name(&self) -> &str { "Memory" }
+    fn name(&self) -> &str {
+        "memory"
+    }
+    fn display_name(&self) -> &str {
+        "Memory"
+    }
 
     fn analyze(&self) -> Result<AnalysisResult> {
         Ok(AnalysisResult::default())
@@ -45,15 +49,22 @@ impl Cleaner for MemoryCleaner {
             ui::format_size(inactive_bytes)
         );
 
-        if dry_run { return Ok(()); }
-        if !yes && !ui::confirm("Run sudo purge?", false)? { return Ok(()); }
+        if dry_run {
+            return Ok(());
+        }
+        if !yes && !ui::confirm("Run sudo purge?", false)? {
+            return Ok(());
+        }
 
         require_sudo();
         let r = run_cmd(&["purge"]);
         if r.success() {
             ui::print_ok("Inactive memory flushed.");
         } else {
-            ui::print_warn(&format!("purge failed: {}", &r.output[..r.output.len().min(200)]));
+            ui::print_warn(&format!(
+                "purge failed: {}",
+                &r.output[..r.output.len().min(200)]
+            ));
         }
         Ok(())
     }

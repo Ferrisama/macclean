@@ -1,22 +1,22 @@
+use crate::core::cmd::run_cmd;
 use anyhow::Result;
 use colored::Colorize;
-use comfy_table::{Table, presets::UTF8_BORDERS_ONLY};
-use crate::core::cmd::run_cmd;
+use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
 
 pub fn map_service(service: &str) -> String {
     match service {
-        "kTCCServiceCamera"              => "Camera".into(),
-        "kTCCServiceMicrophone"          => "Microphone".into(),
-        "kTCCServiceScreenCapture"       => "Screen Recording".into(),
-        "kTCCServiceLocation"            => "Location".into(),
-        "kTCCServiceAddressBook"         => "Contacts".into(),
-        "kTCCServiceCalendar"            => "Calendar".into(),
-        "kTCCServicePhotos"              => "Photos".into(),
-        "kTCCServiceSystemPolicyAllFiles"=> "Full Disk Access".into(),
-        "kTCCServiceAccessibility"       => "Accessibility".into(),
-        "kTCCServiceReminders"           => "Reminders".into(),
-        "kTCCServiceUbiquity"            => "iCloud".into(),
-        "kTCCServiceShareKit"            => "Sharing".into(),
+        "kTCCServiceCamera" => "Camera".into(),
+        "kTCCServiceMicrophone" => "Microphone".into(),
+        "kTCCServiceScreenCapture" => "Screen Recording".into(),
+        "kTCCServiceLocation" => "Location".into(),
+        "kTCCServiceAddressBook" => "Contacts".into(),
+        "kTCCServiceCalendar" => "Calendar".into(),
+        "kTCCServicePhotos" => "Photos".into(),
+        "kTCCServiceSystemPolicyAllFiles" => "Full Disk Access".into(),
+        "kTCCServiceAccessibility" => "Accessibility".into(),
+        "kTCCServiceReminders" => "Reminders".into(),
+        "kTCCServiceUbiquity" => "iCloud".into(),
+        "kTCCServiceShareKit" => "Sharing".into(),
         other => other.replace("kTCCService", ""),
     }
 }
@@ -53,9 +53,9 @@ pub fn run() -> Result<()> {
     table.set_header(vec!["Security Check", "Status"]);
 
     for (name, ok) in &[
-        ("FileVault",  fv),
-        ("Firewall",   fw),
-        ("SIP",        sip),
+        ("FileVault", fv),
+        ("Firewall", fw),
+        ("SIP", sip),
         ("Gatekeeper", gk),
     ] {
         let status = if *ok {
@@ -71,8 +71,7 @@ pub fn run() -> Result<()> {
     println!("\n{}", "[ App Permissions (TCC) ]".cyan().bold());
 
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let db_path = home
-        .join("Library/Application Support/com.apple.TCC/TCC.db");
+    let db_path = home.join("Library/Application Support/com.apple.TCC/TCC.db");
 
     if !db_path.exists() {
         println!("  TCC database not accessible (requires Full Disk Access).");
@@ -103,7 +102,7 @@ pub fn run() -> Result<()> {
             continue;
         }
         let service = map_service(parts[0].trim());
-        let client  = parts[1].trim();
+        let client = parts[1].trim();
         perm_table.add_row(vec![
             service.to_string(),
             client.to_string(),

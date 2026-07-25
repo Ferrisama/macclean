@@ -13,7 +13,10 @@ impl CmdResult {
 
 pub fn run_cmd(args: &[&str]) -> CmdResult {
     if args.is_empty() {
-        return CmdResult { output: String::new(), code: 1 };
+        return CmdResult {
+            output: String::new(),
+            code: 1,
+        };
     }
     match Command::new(args[0]).args(&args[1..]).output() {
         Ok(out) => {
@@ -24,7 +27,10 @@ pub fn run_cmd(args: &[&str]) -> CmdResult {
                 code: out.status.code().unwrap_or(1),
             }
         }
-        Err(e) => CmdResult { output: e.to_string(), code: 1 },
+        Err(e) => CmdResult {
+            output: e.to_string(),
+            code: 1,
+        },
     }
 }
 
@@ -35,7 +41,10 @@ pub fn is_root() -> bool {
 pub fn require_sudo() {
     if !is_root() {
         let args: Vec<String> = std::env::args().collect();
-        eprintln!("This command needs root. Re-run with: sudo {}", args.join(" "));
+        eprintln!(
+            "This command needs root. Re-run with: sudo {}",
+            args.join(" ")
+        );
         std::process::exit(1);
     }
 }

@@ -10,7 +10,11 @@ use crate::ui::format_size;
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(frame.area());
 
     draw_tab_bar(frame, app, chunks[0]);
@@ -69,7 +73,10 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         format!("{}   |   {}", app.status, help)
     };
-    frame.render_widget(Paragraph::new(text).style(Style::new().fg(Color::DarkGray)), area);
+    frame.render_widget(
+        Paragraph::new(text).style(Style::new().fg(Color::DarkGray)),
+        area,
+    );
 }
 
 fn gauge_color(pct: u16) -> Color {
@@ -143,16 +150,24 @@ fn draw_dashboard(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(rows[3]);
 
-    let sec_lines: Vec<Line> = [("FileVault", h.filevault), ("Firewall", h.firewall), ("SIP", h.sip)]
-        .into_iter()
-        .map(|(name, ok)| {
-            let (txt, color) = if ok { ("OK", Color::Green) } else { ("OFF", Color::Red) };
-            Line::from(vec![
-                Span::raw(format!("{:<12}", name)),
-                Span::styled(txt, Style::new().fg(color)),
-            ])
-        })
-        .collect();
+    let sec_lines: Vec<Line> = [
+        ("FileVault", h.filevault),
+        ("Firewall", h.firewall),
+        ("SIP", h.sip),
+    ]
+    .into_iter()
+    .map(|(name, ok)| {
+        let (txt, color) = if ok {
+            ("OK", Color::Green)
+        } else {
+            ("OFF", Color::Red)
+        };
+        Line::from(vec![
+            Span::raw(format!("{:<12}", name)),
+            Span::styled(txt, Style::new().fg(color)),
+        ])
+    })
+    .collect();
     frame.render_widget(
         Paragraph::new(sec_lines).block(Block::bordered().title("Security")),
         bottom[0],
@@ -187,8 +202,15 @@ fn draw_clean(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let checkbox = if cat.selected { "[x]" } else { "[ ]" };
         let size_str = cat.size.map(format_size).unwrap_or_else(|| "-".to_string());
-        let sudo_note = if cat.needs_sudo && !app.is_root { "  (needs sudo)" } else { "" };
-        let line = format!("{} {:<28} {:>10}{}", checkbox, cat.label, size_str, sudo_note);
+        let sudo_note = if cat.needs_sudo && !app.is_root {
+            "  (needs sudo)"
+        } else {
+            ""
+        };
+        let line = format!(
+            "{} {:<28} {:>10}{}",
+            checkbox, cat.label, size_str, sudo_note
+        );
 
         let style = if i == app.clean_cursor {
             Style::new().bg(Color::Cyan).fg(Color::Black)
@@ -215,7 +237,8 @@ fn draw_uninstall_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     frame.render_widget(
-        Paragraph::new(format!("{}_", app.uninstall_filter)).block(Block::bordered().title("Search")),
+        Paragraph::new(format!("{}_", app.uninstall_filter))
+            .block(Block::bordered().title("Search")),
         rows[0],
     );
 
@@ -235,11 +258,18 @@ fn draw_uninstall_list(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let visible = inner.height as usize;
-    let start = app.uninstall_cursor.saturating_sub(visible.saturating_sub(1));
+    let start = app
+        .uninstall_cursor
+        .saturating_sub(visible.saturating_sub(1));
 
     for (row_i, &idx) in filtered.iter().enumerate().skip(start).take(visible) {
         let y = inner.y + (row_i - start) as u16;
-        let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
+        let rect = Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height: 1,
+        };
         app.uninstall_row_rects.push((rect, row_i));
 
         let style = if row_i == app.uninstall_cursor {
@@ -262,7 +292,11 @@ fn draw_uninstall_review(frame: &mut Frame, app: &App, area: Rect) {
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
         .split(area);
 
     let mut header_lines = vec![Line::from(format!(
@@ -290,12 +324,18 @@ fn draw_uninstall_review(frame: &mut Frame, app: &App, area: Rect) {
                 .strip_prefix(&home)
                 .map(|p| format!("~/{}", p.display()))
                 .unwrap_or_else(|_| item.path.display().to_string());
-            Line::from(format!("{:<70} {:>10}", label, format_size(item.size_bytes)))
+            Line::from(format!(
+                "{:<70} {:>10}",
+                label,
+                format_size(item.size_bytes)
+            ))
         })
         .collect();
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::bordered().title(format!("Will remove -- total {}", format_size(plan.total_size)))),
+        Paragraph::new(lines).block(Block::bordered().title(format!(
+            "Will remove -- total {}",
+            format_size(plan.total_size)
+        ))),
         rows[1],
     );
 
@@ -362,20 +402,46 @@ fn draw_explore(frame: &mut Frame, app: &mut App, area: Rect) {
     app.explore_row_rects.clear();
 
     if app.explore_entries.is_empty() {
-        let msg = if app.explore_loading { "Scanning..." } else { "Empty." };
-        frame.render_widget(Paragraph::new(msg).style(Style::new().fg(Color::DarkGray)), inner);
+        let msg = if app.explore_loading {
+            "Scanning..."
+        } else {
+            "Empty."
+        };
+        frame.render_widget(
+            Paragraph::new(msg).style(Style::new().fg(Color::DarkGray)),
+            inner,
+        );
         return;
     }
 
-    let max_size = app.explore_entries.iter().map(|e| e.size).max().unwrap_or(1).max(1);
+    let max_size = app
+        .explore_entries
+        .iter()
+        .map(|e| e.size)
+        .max()
+        .unwrap_or(1)
+        .max(1);
     let visible = inner.height as usize;
     let start = app.explore_cursor.saturating_sub(visible.saturating_sub(1));
     let bar_width = 24usize;
-    let name_width = (inner.width as usize).saturating_sub(bar_width + 14).max(10);
+    let name_width = (inner.width as usize)
+        .saturating_sub(bar_width + 14)
+        .max(10);
 
-    for (row_i, entry) in app.explore_entries.iter().enumerate().skip(start).take(visible) {
+    for (row_i, entry) in app
+        .explore_entries
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+    {
         let y = inner.y + (row_i - start) as u16;
-        let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
+        let rect = Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height: 1,
+        };
         app.explore_row_rects.push(rect);
 
         let suffix = if entry.is_dir { "/" } else { "" };
@@ -407,7 +473,10 @@ fn draw_explore(frame: &mut Frame, app: &mut App, area: Rect) {
                     entry.name
                 )
             } else {
-                format!("Move '{}' to Trash? Enter/y confirm, Esc/n cancel.", entry.name)
+                format!(
+                    "Move '{}' to Trash? Enter/y confirm, Esc/n cancel.",
+                    entry.name
+                )
             };
             let popup = Rect {
                 x: area.x + 2,
@@ -416,7 +485,9 @@ fn draw_explore(frame: &mut Frame, app: &mut App, area: Rect) {
                 height: 3,
             };
             frame.render_widget(
-                Paragraph::new(msg).style(Style::new().fg(Color::Red).bold()).block(Block::bordered()),
+                Paragraph::new(msg)
+                    .style(Style::new().fg(Color::Red).bold())
+                    .block(Block::bordered()),
                 popup,
             );
         }

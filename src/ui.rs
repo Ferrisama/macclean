@@ -1,5 +1,5 @@
 use colored::Colorize;
-use comfy_table::{Table, presets::UTF8_BORDERS_ONLY};
+use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
 
 use crate::core::CleanItem;
 
@@ -32,15 +32,83 @@ pub fn confirm(prompt: &str, default: bool) -> anyhow::Result<bool> {
 pub fn print_analysis(title: &str, items: &[CleanItem]) {
     let mut table = Table::new();
     table.load_preset(UTF8_BORDERS_ONLY);
-    table.set_header(vec!["Location", "Size"]);
+    table.set_header(vec!["Location", "Size", "Type", "Risk", "Why"]);
     for item in items {
-        table.add_row(vec![item.label.clone(), format_size(item.size_bytes)]);
+        table.add_row(vec![
+            item.label.clone(),
+            format_size(item.size_bytes),
+            item.kind.label().to_string(),
+            item.risk.label().to_string(),
+            item.reason.clone(),
+        ]);
     }
-    let total: u64 = items.iter().filter(|i| i.removable).map(|i| i.size_bytes).sum();
+    let total: u64 = items
+        .iter()
+        .filter(|i| i.removable)
+        .map(|i| i.size_bytes)
+        .sum();
     println!();
     println!("{}", format!("[ {} ]", title).cyan().bold());
     println!("{}", table);
     println!("  Total recoverable: {}", format_size(total).bold());
+}
+
+pub fn print_history(limit: usize) -> anyhow::Result<()> {
+    let mut records = crate::core::history::read_all()?;
+    records.sort_by_key(|record| std::cmp::Reverse(record.timestamp));
+
+    if records.is_empty() {
+        println!("No macclean history found.");
+        return Ok(());
+    }
+
+    let mut table = Table::new();
+    table.load_preset(UTF8_BORDERS_ONLY);
+    table.set_header(vec![
+        "Session",
+        "Cleaner",
+        "Item",
+        "Size",
+        "Method",
+        "Original Path",
+    ]);
+    for record in records.into_iter().take(limit) {
+        table.add_row(vec![
+            record.session_id,
+            record.cleaner,
+            record.label,
+            format_size(record.size_bytes),
+            record.method,
+            record.original_path.display().to_string(),
+        ]);
+    }
+
+    println!("\n{}", "[ Cleanup History ]".cyan().bold());
+    println!("{}", table);
+    println!("  Restore latest: macclean restore");
+    println!("  Restore session: macclean restore <session>");
+    Ok(())
+}
+
+pub fn print_plan(plan: &crate::core::plan::StoredPlan) {
+    let mut table = Table::new();
+    table.load_preset(UTF8_BORDERS_ONLY);
+    table.set_header(vec!["Path", "Size", "Type", "Risk", "Why"]);
+    for item in &plan.items {
+        table.add_row(vec![
+            item.path.display().to_string(),
+            format_size(item.size_bytes),
+            item.kind.label().to_string(),
+            item.risk.label().to_string(),
+            item.reason.clone(),
+        ]);
+    }
+
+    println!("\n{}", format!("[ Plan: {} ]", plan.name).cyan().bold());
+    println!("  Source: {}", plan.source);
+    println!("  Items: {}", plan.items.len());
+    println!("  Total: {}", format_size(plan.total_bytes()).bold());
+    println!("{}", table);
 }
 
 pub fn print_ok(msg: &str) {

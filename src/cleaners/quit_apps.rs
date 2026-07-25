@@ -1,9 +1,9 @@
+use crate::core::cmd::run_cmd;
+use crate::ui::{confirm, print_ok, print_warn};
 use anyhow::Result;
 use colored::Colorize;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use crate::core::cmd::run_cmd;
-use crate::ui::{confirm, print_ok, print_warn};
 
 const ALWAYS_KEEP: &[&str] = &["Finder"];
 
@@ -34,19 +34,25 @@ fn load_keep_list() -> Option<Vec<String>> {
     }
     let text = std::fs::read_to_string(&path).ok()?;
     // Quick sanity check: must contain at least one quote
-    if !text.contains('"') { return None; }
+    if !text.contains('"') {
+        return None;
+    }
     // Minimal JSON parse: find array content after "keep":
     let keep_pos = text.find("\"keep\"")?;
-    let rest     = &text[keep_pos + 6..];
+    let rest = &text[keep_pos + 6..];
     let arr_start = rest.find('[')? + 1;
-    let arr_end   = rest.find(']')?;
+    let arr_end = rest.find(']')?;
     let arr_content = &rest[arr_start..arr_end];
 
     let items: Vec<String> = arr_content
         .split(',')
         .filter_map(|s| {
             let trimmed = s.trim().trim_matches('"').trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         })
         .collect();
 
@@ -54,10 +60,7 @@ fn load_keep_list() -> Option<Vec<String>> {
 }
 
 fn save_keep_list(keep: &[String]) -> anyhow::Result<()> {
-    let entries: Vec<String> = keep
-        .iter()
-        .map(|s| format!("  \"{}\"", s))
-        .collect();
+    let entries: Vec<String> = keep.iter().map(|s| format!("  \"{}\"", s)).collect();
     let json = format!("{{\n  \"keep\": [\n{}\n  ]\n}}\n", entries.join(",\n"));
     std::fs::write(config_path(), json)?;
     Ok(())
@@ -92,7 +95,7 @@ pub fn run(do_configure: bool, dry_run: bool, yes: bool) -> Result<()> {
 
     // ── Determine keep list ───────────────────────────────────────────────────
     let existing_config = load_keep_list();
-    let needs_configure  = do_configure || existing_config.is_none();
+    let needs_configure = do_configure || existing_config.is_none();
 
     let keep_list: Vec<String> = if needs_configure {
         // Interactive selection with inquire
@@ -166,7 +169,11 @@ pub fn run(do_configure: bool, dry_run: bool, yes: bool) -> Result<()> {
         if r.success() {
             print_ok(&format!("Quit: {}", app));
         } else {
-            print_warn(&format!("Could not quit {}: {}", app, &r.output[..r.output.len().min(120)]));
+            print_warn(&format!(
+                "Could not quit {}: {}",
+                app,
+                &r.output[..r.output.len().min(120)]
+            ));
         }
     }
 

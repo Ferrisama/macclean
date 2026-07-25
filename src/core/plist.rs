@@ -54,10 +54,7 @@ mod tests {
             .to_file_binary(app.join("Contents/Info.plist"))
             .unwrap();
 
-        assert_eq!(
-            read_bundle_id(&app),
-            Some("com.example.Binary".to_string())
-        );
+        assert_eq!(read_bundle_id(&app), Some("com.example.Binary".to_string()));
     }
 
     #[test]

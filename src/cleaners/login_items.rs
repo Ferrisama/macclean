@@ -1,8 +1,8 @@
+use crate::core::cmd::run_cmd;
 use anyhow::Result;
 use colored::Colorize;
-use comfy_table::{Table, presets::UTF8_BORDERS_ONLY};
+use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
 use std::path::PathBuf;
-use crate::core::cmd::run_cmd;
 
 /// Parse sfltool dumpbtm output.
 /// Lines may look like:
@@ -11,7 +11,7 @@ use crate::core::cmd::run_cmd;
 fn parse_sfltool(output: &str) -> Vec<(String, String)> {
     let mut items: Vec<(String, String)> = Vec::new();
     let mut current_name = String::new();
-    let mut current_url  = String::new();
+    let mut current_url = String::new();
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -84,11 +84,18 @@ pub fn run() -> Result<()> {
                 format!("/Applications/{}.app", name),
                 format!("/Applications/{}", name),
                 dirs::home_dir()
-                    .map(|h| h.join("Applications").join(format!("{}.app", name))
-                              .to_string_lossy().to_string())
+                    .map(|h| {
+                        h.join("Applications")
+                            .join(format!("{}.app", name))
+                            .to_string_lossy()
+                            .to_string()
+                    })
                     .unwrap_or_default(),
             ];
-            if candidates.iter().any(|c| !c.is_empty() && PathBuf::from(c).exists()) {
+            if candidates
+                .iter()
+                .any(|c| !c.is_empty() && PathBuf::from(c).exists())
+            {
                 "Yes".green().to_string()
             } else {
                 "?".yellow().to_string()
@@ -101,7 +108,11 @@ pub fn run() -> Result<()> {
 
         table.add_row(vec![
             name.clone(),
-            if path.is_empty() { "N/A".to_string() } else { path.clone() },
+            if path.is_empty() {
+                "N/A".to_string()
+            } else {
+                path.clone()
+            },
             exists,
         ]);
     }

@@ -1,14 +1,18 @@
-use std::path::PathBuf;
-use anyhow::Result;
-use crate::core::{AnalysisResult, Cleaner};
 use crate::core::fs::{dir_size, remove_dir_contents};
+use crate::core::{AnalysisResult, Cleaner};
 use crate::ui;
+use anyhow::Result;
+use std::path::PathBuf;
 
 pub struct BrowserCleaner;
 
 impl Cleaner for BrowserCleaner {
-    fn name(&self) -> &str { "browser" }
-    fn display_name(&self) -> &str { "Browser Caches" }
+    fn name(&self) -> &str {
+        "browser"
+    }
+    fn display_name(&self) -> &str {
+        "Browser Caches"
+    }
 
     fn analyze(&self) -> Result<AnalysisResult> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -41,8 +45,12 @@ impl Cleaner for BrowserCleaner {
             return Ok(());
         }
         ui::print_analysis("Browser Caches", &result.items);
-        if dry_run { return Ok(()); }
-        if !yes && !ui::confirm("Clear browser caches?", false)? { return Ok(()); }
+        if dry_run {
+            return Ok(());
+        }
+        if !yes && !ui::confirm("Clear browser caches?", false)? {
+            return Ok(());
+        }
         for item in &result.items {
             match remove_dir_contents(&item.path) {
                 Ok(_) => ui::print_ok(&format!("Cleared {}", item.label)),

@@ -1,15 +1,19 @@
-use std::path::PathBuf;
-use anyhow::Result;
-use crate::core::{AnalysisResult, Cleaner};
-use crate::core::fs::{dir_size, remove_dir_contents};
 use crate::core::cmd::run_cmd;
+use crate::core::fs::{dir_size, remove_dir_contents};
+use crate::core::{AnalysisResult, Cleaner};
 use crate::ui;
+use anyhow::Result;
+use std::path::PathBuf;
 
 pub struct GoCacheCleaner;
 
 impl Cleaner for GoCacheCleaner {
-    fn name(&self) -> &str { "go" }
-    fn display_name(&self) -> &str { "Go Module Cache" }
+    fn name(&self) -> &str {
+        "go"
+    }
+    fn display_name(&self) -> &str {
+        "Go Module Cache"
+    }
 
     fn analyze(&self) -> Result<AnalysisResult> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -32,8 +36,12 @@ impl Cleaner for GoCacheCleaner {
             return Ok(());
         }
         ui::print_analysis("Go Module Cache", &result.items);
-        if dry_run { return Ok(()); }
-        if !yes && !ui::confirm("Clear Go module cache?", false)? { return Ok(()); }
+        if dry_run {
+            return Ok(());
+        }
+        if !yes && !ui::confirm("Clear Go module cache?", false)? {
+            return Ok(());
+        }
         for item in &result.items {
             match remove_dir_contents(&item.path) {
                 Ok(_) => ui::print_ok(&format!("Cleared {}", item.label)),

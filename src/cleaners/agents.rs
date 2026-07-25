@@ -40,7 +40,7 @@ fn scan_dir(dir: &Path, table: &mut Table) {
     };
 
     let dir_label = dir.display().to_string();
-    let home_str  = dirs::home_dir()
+    let home_str = dirs::home_dir()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
     let display_dir = if dir_label.starts_with(&home_str) {

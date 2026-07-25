@@ -1,9 +1,9 @@
-use anyhow::Result;
-use colored::Colorize;
-use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
 use crate::core::cmd::run_cmd;
 use crate::core::fs::dir_size;
 use crate::ui::format_size;
+use anyhow::Result;
+use colored::Colorize;
+use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
 
 pub struct HealthSnapshot {
     pub disk_total: u64,
@@ -21,7 +21,9 @@ pub struct HealthSnapshot {
 }
 
 fn filevault_status() -> bool {
-    run_cmd(&["fdesetup", "status"]).output.contains("FileVault is On")
+    run_cmd(&["fdesetup", "status"])
+        .output
+        .contains("FileVault is On")
 }
 
 fn firewall_status() -> bool {
@@ -91,8 +93,14 @@ pub fn snapshot() -> HealthSnapshot {
     let mem_used = (pages_active + pages_speculative + pages_wired) * page_size;
 
     // ── CPU ───────────────────────────────────────────────────────────────────
-    let ncpu = run_cmd(&["sysctl", "-n", "hw.ncpu"]).output.trim().to_string();
-    let load_avg = run_cmd(&["sysctl", "-n", "vm.loadavg"]).output.trim().to_string();
+    let ncpu = run_cmd(&["sysctl", "-n", "hw.ncpu"])
+        .output
+        .trim()
+        .to_string();
+    let load_avg = run_cmd(&["sysctl", "-n", "vm.loadavg"])
+        .output
+        .trim()
+        .to_string();
 
     // ── Battery ───────────────────────────────────────────────────────────────
     let batt_r = run_cmd(&["pmset", "-g", "batt"]);
@@ -187,8 +195,16 @@ pub fn run() -> Result<()> {
     sec_table.load_preset(UTF8_BORDERS_ONLY);
     sec_table.set_header(vec!["Check", "Status"]);
 
-    for (name, ok) in [("FileVault", s.filevault), ("Firewall", s.firewall), ("SIP", s.sip)] {
-        let status = if ok { "OK".green().to_string() } else { "OFF".red().to_string() };
+    for (name, ok) in [
+        ("FileVault", s.filevault),
+        ("Firewall", s.firewall),
+        ("SIP", s.sip),
+    ] {
+        let status = if ok {
+            "OK".green().to_string()
+        } else {
+            "OFF".red().to_string()
+        };
         sec_table.add_row(vec![name.to_string(), status]);
     }
     println!("{}", sec_table);

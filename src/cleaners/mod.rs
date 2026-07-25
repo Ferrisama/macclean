@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod android;
 pub mod apps;
 pub mod brew;
 pub mod browser;
@@ -30,6 +31,7 @@ pub mod security;
 pub mod spotlight;
 pub mod stremio;
 pub mod system;
+pub mod system_data;
 pub mod timemachine;
 pub mod trash;
 pub mod uninstall;
@@ -49,6 +51,7 @@ pub fn all_cleaners() -> Vec<Box<dyn Cleaner>> {
         Box::new(pip::PipCleaner),
         Box::new(cargo_cache::CargoCacheCleaner),
         Box::new(gradle::GradleCleaner),
+        Box::new(android::AndroidCleaner),
         Box::new(maven::MavenCleaner),
         Box::new(go_cache::GoCacheCleaner),
         Box::new(crash_reports::CrashReportsCleaner),

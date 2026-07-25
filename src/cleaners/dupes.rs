@@ -1,17 +1,24 @@
+use crate::core::{AnalysisResult, CleanKind, RiskLevel};
+use crate::ui::{self, format_size};
+use anyhow::Result;
+use colored::Colorize;
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use anyhow::Result;
-use rayon::prelude::*;
-use sha2::{Sha256, Digest};
 use walkdir::WalkDir;
-use indicatif::{ProgressBar, ProgressStyle};
-use colored::Colorize;
-use crate::ui::format_size;
 
-pub fn run(min_mb: u64, scan_path: Option<PathBuf>) -> Result<()> {
-    let root = scan_path
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+pub fn run(
+    min_mb: u64,
+    scan_path: Option<PathBuf>,
+    trash: bool,
+    keep: &str,
+    dry_run: bool,
+    yes: bool,
+) -> Result<()> {
+    let root = scan_path.unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
     let min_bytes = min_mb * 1024 * 1024;
 
     println!(
@@ -66,10 +73,7 @@ pub fn run(min_mb: u64, scan_path: Option<PathBuf>) -> Result<()> {
     let mut by_hash: HashMap<String, Vec<(PathBuf, u64)>> = HashMap::new();
 
     for (size, paths) in &candidates {
-        let hashes: Vec<Option<String>> = paths
-            .par_iter()
-            .map(|path| hash_file(path))
-            .collect();
+        let hashes: Vec<Option<String>> = paths.par_iter().map(|path| hash_file(path)).collect();
 
         for (path, hash) in paths.iter().zip(hashes) {
             pb.inc(1);
@@ -83,6 +87,10 @@ pub fn run(min_mb: u64, scan_path: Option<PathBuf>) -> Result<()> {
     let dup_groups: Vec<Vec<(PathBuf, u64)>> = by_hash
         .into_values()
         .filter(|v| v.len() > 1)
+        .map(|mut group| {
+            group.sort_by_key(|(path, _)| path.display().to_string());
+            group
+        })
         .collect();
 
     if dup_groups.is_empty() {
@@ -102,7 +110,7 @@ pub fn run(min_mb: u64, scan_path: Option<PathBuf>) -> Result<()> {
 
     let mut total_wasted: u64 = 0;
     for group in &groups {
-        let size   = group[0].1;
+        let size = group[0].1;
         let wasted = size * (group.len() as u64 - 1);
         total_wasted += wasted;
 
@@ -124,28 +132,133 @@ pub fn run(min_mb: u64, scan_path: Option<PathBuf>) -> Result<()> {
                 .strip_prefix(&home)
                 .map(|p| format!("  -> ~/{}", p.display()))
                 .unwrap_or_else(|_| format!("  -> {}", path.display()));
-            table.add_row(vec![
-                label,
-                String::new(),
-                String::new(),
-                String::new(),
-            ]);
+            table.add_row(vec![label, String::new(), String::new(), String::new()]);
         }
     }
 
     println!("\n{}", "[ Duplicate Files ]".cyan().bold());
     println!("{}", table);
     println!("  Total wasted: {}", format_size(total_wasted).bold());
-    println!(
-        "  {} duplicate group(s). Review paths above -- delete copies manually.",
-        groups.len()
-    );
+    if !trash {
+        println!(
+            "  {} duplicate group(s). Use --trash to move duplicate copies to Trash.",
+            groups.len()
+        );
+        return Ok(());
+    }
+    if dry_run {
+        ui::print_warn("Dry run -- duplicate files were not moved to Trash.");
+        return Ok(());
+    }
+
+    let keep = KeepStrategy::parse(keep);
+    let mut analysis = AnalysisResult::default();
+    for group in &groups {
+        let keep_path = keep.select(group);
+        for (path, size) in group {
+            if path == keep_path {
+                continue;
+            }
+            analysis.add_with_meta(
+                path.display().to_string(),
+                path.clone(),
+                *size,
+                CleanKind::Duplicate,
+                RiskLevel::High,
+                format!(
+                    "Content-identical duplicate; keeping {} by {} strategy.",
+                    keep_path.display(),
+                    keep.label()
+                ),
+            );
+        }
+    }
+
+    if !yes
+        && !ui::confirm(
+            &format!("Move {} duplicate file(s) to Trash?", analysis.items.len()),
+            false,
+        )?
+    {
+        return Ok(());
+    }
+
+    for (path, outcome) in crate::core::trash::trash_clean_items("dupes", &analysis.items) {
+        match outcome {
+            Ok(_) => ui::print_ok(&format!("Moved to Trash: {}", path.display())),
+            Err(e) => ui::print_warn(&format!("{}: {}", path.display(), e)),
+        }
+    }
 
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum KeepStrategy {
+    First,
+    Newest,
+    Oldest,
+    ShortestPath,
+}
+
+impl KeepStrategy {
+    fn parse(value: &str) -> Self {
+        match value {
+            "newest" => Self::Newest,
+            "oldest" => Self::Oldest,
+            "shortest" | "shortest-path" => Self::ShortestPath,
+            _ => Self::First,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::First => "first",
+            Self::Newest => "newest",
+            Self::Oldest => "oldest",
+            Self::ShortestPath => "shortest-path",
+        }
+    }
+
+    fn select(self, group: &[(PathBuf, u64)]) -> &PathBuf {
+        match self {
+            Self::First => &group[0].0,
+            Self::Newest => {
+                &group
+                    .iter()
+                    .max_by_key(|(path, _)| modified_secs(path))
+                    .unwrap_or(&group[0])
+                    .0
+            }
+            Self::Oldest => {
+                &group
+                    .iter()
+                    .min_by_key(|(path, _)| modified_secs(path))
+                    .unwrap_or(&group[0])
+                    .0
+            }
+            Self::ShortestPath => {
+                &group
+                    .iter()
+                    .min_by_key(|(path, _)| path.components().count())
+                    .unwrap_or(&group[0])
+                    .0
+            }
+        }
+    }
+}
+
+fn modified_secs(path: &Path) -> u64 {
+    path.metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn hash_file(path: &Path) -> Option<String> {
-    let mut file   = std::fs::File::open(path).ok()?;
+    let mut file = std::fs::File::open(path).ok()?;
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher).ok()?;
     Some(format!("{:x}", hasher.finalize()))

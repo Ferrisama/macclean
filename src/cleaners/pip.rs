@@ -1,15 +1,19 @@
-use std::path::PathBuf;
-use anyhow::Result;
-use crate::core::{AnalysisResult, Cleaner};
-use crate::core::fs::{dir_size, remove_dir_contents};
 use crate::core::cmd::run_as_user;
+use crate::core::fs::{dir_size, remove_dir_contents};
+use crate::core::{AnalysisResult, Cleaner};
 use crate::ui;
+use anyhow::Result;
+use std::path::PathBuf;
 
 pub struct PipCleaner;
 
 impl Cleaner for PipCleaner {
-    fn name(&self) -> &str { "pip" }
-    fn display_name(&self) -> &str { "pip Cache" }
+    fn name(&self) -> &str {
+        "pip"
+    }
+    fn display_name(&self) -> &str {
+        "pip Cache"
+    }
 
     fn analyze(&self) -> Result<AnalysisResult> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -39,8 +43,12 @@ impl Cleaner for PipCleaner {
             return Ok(());
         }
         ui::print_analysis("pip Cache", &result.items);
-        if dry_run { return Ok(()); }
-        if !yes && !ui::confirm("Clear pip caches?", false)? { return Ok(()); }
+        if dry_run {
+            return Ok(());
+        }
+        if !yes && !ui::confirm("Clear pip caches?", false)? {
+            return Ok(());
+        }
         for item in &result.items {
             match remove_dir_contents(&item.path) {
                 Ok(_) => ui::print_ok(&format!("Cleared {}", item.label)),

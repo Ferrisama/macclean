@@ -1,8 +1,9 @@
+mod ask;
+mod cleaners;
 mod cli;
 mod core;
-mod ui;
-mod cleaners;
 mod tui;
+mod ui;
 
 fn main() -> anyhow::Result<()> {
     cli::run()

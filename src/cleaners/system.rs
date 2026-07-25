@@ -1,11 +1,11 @@
+use crate::core::cmd::{require_sudo, run_cmd};
+use crate::core::fs::dir_size;
+use crate::core::{AnalysisResult, Cleaner};
+use crate::ui;
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
-use anyhow::Result;
 use walkdir::WalkDir;
-use crate::core::{AnalysisResult, Cleaner};
-use crate::core::fs::dir_size;
-use crate::core::cmd::{run_cmd, require_sudo};
-use crate::ui;
 
 pub struct SystemCleaner;
 
@@ -16,8 +16,12 @@ pub struct SystemCleaner;
 const TMP_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 impl Cleaner for SystemCleaner {
-    fn name(&self) -> &str { "system" }
-    fn display_name(&self) -> &str { "System Caches & Logs" }
+    fn name(&self) -> &str {
+        "system"
+    }
+    fn display_name(&self) -> &str {
+        "System Caches & Logs"
+    }
 
     fn analyze(&self) -> Result<AnalysisResult> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -48,7 +52,11 @@ impl Cleaner for SystemCleaner {
         let log_dir = PathBuf::from("/private/var/log");
         let rotated_size = scoped_size(&log_dir, is_rotated_log);
         if rotated_size > 0 {
-            result.add("/private/var/log (rotated logs only)", log_dir, rotated_size);
+            result.add(
+                "/private/var/log (rotated logs only)",
+                log_dir,
+                rotated_size,
+            );
         }
 
         let tmp_dir = PathBuf::from("/private/tmp");
@@ -66,8 +74,12 @@ impl Cleaner for SystemCleaner {
             return Ok(());
         }
         ui::print_analysis("System Caches & Logs", &result.items);
-        if dry_run { return Ok(()); }
-        if !yes && !ui::confirm("Clean system caches and logs?", false)? { return Ok(()); }
+        if dry_run {
+            return Ok(());
+        }
+        if !yes && !ui::confirm("Clean system caches and logs?", false)? {
+            return Ok(());
+        }
 
         require_sudo();
 
@@ -129,7 +141,9 @@ fn remove_scoped(dir: &Path, keep: impl Fn(&Path) -> bool) -> Result<()> {
 /// Already-rotated/archived log files (e.g. `system.log.1`, `install.log.0.gz`) --
 /// never a live log a daemon is currently appending to.
 fn is_rotated_log(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return false; };
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
     if name.ends_with(".gz") || name.ends_with(".bz2") || name.ends_with(".Z") {
         return true;
     }
@@ -139,8 +153,12 @@ fn is_rotated_log(path: &Path) -> bool {
 }
 
 fn is_stale(path: &Path, min_age: Duration) -> bool {
-    let Ok(meta) = path.symlink_metadata() else { return false; };
-    let Ok(modified) = meta.modified() else { return false; };
+    let Ok(meta) = path.symlink_metadata() else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
     SystemTime::now()
         .duration_since(modified)
         .is_ok_and(|age| age >= min_age)

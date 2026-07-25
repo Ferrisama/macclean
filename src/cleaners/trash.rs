@@ -1,14 +1,18 @@
-use std::path::PathBuf;
-use anyhow::Result;
-use crate::core::{AnalysisResult, Cleaner};
 use crate::core::fs::{dir_size, remove_dir_contents};
+use crate::core::{AnalysisResult, Cleaner};
 use crate::ui;
+use anyhow::Result;
+use std::path::PathBuf;
 
 pub struct TrashCleaner;
 
 impl Cleaner for TrashCleaner {
-    fn name(&self) -> &str { "trash" }
-    fn display_name(&self) -> &str { "Trash" }
+    fn name(&self) -> &str {
+        "trash"
+    }
+    fn display_name(&self) -> &str {
+        "Trash"
+    }
 
     fn analyze(&self) -> Result<AnalysisResult> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -31,7 +35,10 @@ impl Cleaner for TrashCleaner {
                     if vol_trash.exists() {
                         let size = dir_size(&vol_trash);
                         if size > 0 {
-                            let label = format!("/Volumes/{}/.Trashes", entry.file_name().to_string_lossy());
+                            let label = format!(
+                                "/Volumes/{}/.Trashes",
+                                entry.file_name().to_string_lossy()
+                            );
                             result.add(label, vol_trash, size);
                         }
                     }
@@ -48,8 +55,12 @@ impl Cleaner for TrashCleaner {
             return Ok(());
         }
         ui::print_analysis("Trash", &result.items);
-        if dry_run { return Ok(()); }
-        if !yes && !ui::confirm("Empty all trash?", false)? { return Ok(()); }
+        if dry_run {
+            return Ok(());
+        }
+        if !yes && !ui::confirm("Empty all trash?", false)? {
+            return Ok(());
+        }
         for item in &result.items {
             match remove_dir_contents(&item.path) {
                 Ok(_) => ui::print_ok(&format!("Cleared {}", item.label)),

@@ -1,6 +1,6 @@
-use anyhow::Result;
 use crate::core::cmd::run_as_user;
 use crate::ui::{print_ok, print_warn};
+use anyhow::Result;
 
 pub fn run(do_brew: bool, do_pip: bool, do_npm: bool) -> Result<()> {
     // ── Homebrew ──────────────────────────────────────────────────────────────

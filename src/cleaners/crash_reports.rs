@@ -1,15 +1,19 @@
-use std::path::PathBuf;
-use anyhow::Result;
-use crate::core::{AnalysisResult, Cleaner};
-use crate::core::fs::{dir_size, remove_dir_contents};
 use crate::core::cmd::require_sudo;
+use crate::core::fs::{dir_size, remove_dir_contents};
+use crate::core::{AnalysisResult, Cleaner};
 use crate::ui;
+use anyhow::Result;
+use std::path::PathBuf;
 
 pub struct CrashReportsCleaner;
 
 impl Cleaner for CrashReportsCleaner {
-    fn name(&self) -> &str { "crash-reports" }
-    fn display_name(&self) -> &str { "Crash Reports" }
+    fn name(&self) -> &str {
+        "crash-reports"
+    }
+    fn display_name(&self) -> &str {
+        "Crash Reports"
+    }
 
     fn analyze(&self) -> Result<AnalysisResult> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -40,8 +44,12 @@ impl Cleaner for CrashReportsCleaner {
             return Ok(());
         }
         ui::print_analysis("Crash Reports", &result.items);
-        if dry_run { return Ok(()); }
-        if !yes && !ui::confirm("Remove all crash reports?", false)? { return Ok(()); }
+        if dry_run {
+            return Ok(());
+        }
+        if !yes && !ui::confirm("Remove all crash reports?", false)? {
+            return Ok(());
+        }
 
         require_sudo();
 

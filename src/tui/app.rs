@@ -42,9 +42,17 @@ pub enum BgEvent {
     CleanSize(usize, Option<u64>),
     CleanAnalyzeDone,
     UninstallPlanReady(Result<uninstall::UninstallPlan, String>),
-    UninstallExecuted { app_name: String, dry_run: bool, trashed: usize, failed: usize },
+    UninstallExecuted {
+        app_name: String,
+        dry_run: bool,
+        trashed: usize,
+        failed: usize,
+    },
     ExploreScanned(PathBuf, Vec<ExploreEntry>),
-    ExploreDeleted { name: String, result: Result<(), String> },
+    ExploreDeleted {
+        name: String,
+        result: Result<(), String>,
+    },
 }
 
 pub struct ExploreEntry {
@@ -72,15 +80,32 @@ const CLEAN_CATALOG: &[(&str, &str, bool)] = &[
     ("node", "Node.js Caches", false),
     ("pip", "pip Cache", false),
     ("cargo", "Cargo Cache", false),
+    ("gradle", "Gradle Cache", false),
+    ("android", "Android SDK Caches", false),
+    ("stremio", "Stremio Caches", false),
     ("crash-reports", "Crash Reports", false),
     ("projects", "Project Artifacts", false),
 ];
 
 const QUICK_PRESET: &[&str] = &["trash", "browser", "crash-reports"];
-const DEV_PRESET: &[&str] = &["brew", "docker", "node", "pip", "cargo", "xcode", "projects"];
+const DEV_PRESET: &[&str] = &[
+    "brew", "docker", "node", "pip", "cargo", "gradle", "android", "xcode", "projects",
+];
 const DEEP_PRESET: &[&str] = &[
-    "trash", "system", "browser", "docker", "brew", "xcode", "node", "pip", "cargo",
-    "crash-reports", "projects",
+    "trash",
+    "system",
+    "browser",
+    "docker",
+    "brew",
+    "xcode",
+    "node",
+    "pip",
+    "cargo",
+    "gradle",
+    "android",
+    "stremio",
+    "crash-reports",
+    "projects",
 ];
 
 pub struct App {
@@ -207,7 +232,12 @@ impl App {
                         Err(e) => self.status = format!("Error: {}", e),
                     }
                 }
-                BgEvent::UninstallExecuted { app_name, dry_run, trashed, failed } => {
+                BgEvent::UninstallExecuted {
+                    app_name,
+                    dry_run,
+                    trashed,
+                    failed,
+                } => {
                     self.uninstall_loading = false;
                     self.uninstall_screen = UninstallScreen::List;
                     self.uninstall_apps = uninstall::list_installed_apps();
@@ -215,7 +245,10 @@ impl App {
                     self.status = if dry_run {
                         format!("Dry run -- {} not touched.", app_name)
                     } else {
-                        format!("Uninstalled {}: {} moved to Trash, {} failed.", app_name, trashed, failed)
+                        format!(
+                            "Uninstalled {}: {} moved to Trash, {} failed.",
+                            app_name, trashed, failed
+                        )
                     };
                 }
                 BgEvent::ExploreScanned(dir, entries) => {
@@ -375,7 +408,9 @@ impl App {
         let tx = self.bg_tx.clone();
         thread::spawn(move || {
             for (i, key) in keys.into_iter().enumerate() {
-                let size = cleaners::cleaner_by_name(key).and_then(|c| c.analyze().ok()).map(|r| r.total_bytes());
+                let size = cleaners::cleaner_by_name(key)
+                    .and_then(|c| c.analyze().ok())
+                    .map(|r| r.total_bytes());
                 if tx.send(BgEvent::CleanSize(i, size)).is_err() {
                     return;
                 }
@@ -403,14 +438,18 @@ impl App {
                 );
                 continue;
             }
-            let Some(cleaner) = cleaners::cleaner_by_name(cat.key) else { continue };
+            let Some(cleaner) = cleaners::cleaner_by_name(cat.key) else {
+                continue;
+            };
             match cleaner.analyze() {
                 Ok(result) => {
                     if let Err(e) = cleaner.clean(&result, self.dry_run, true) {
                         crate::ui::print_warn(&format!("{}: {}", cleaner.display_name(), e));
                     }
                 }
-                Err(e) => crate::ui::print_err(&format!("Error in {}: {}", cleaner.display_name(), e)),
+                Err(e) => {
+                    crate::ui::print_err(&format!("Error in {}: {}", cleaner.display_name(), e))
+                }
             }
         }
         println!();
@@ -493,7 +532,9 @@ impl App {
     }
 
     fn start_execute_uninstall(&mut self) {
-        let Some(plan) = self.uninstall_plan.take() else { return };
+        let Some(plan) = self.uninstall_plan.take() else {
+            return;
+        };
         if self.uninstall_loading {
             return;
         }
@@ -515,7 +556,12 @@ impl App {
             let results = uninstall::execute(&plan);
             let trashed = results.iter().filter(|(_, r)| r.is_ok()).count();
             let failed = results.len() - trashed;
-            let _ = tx.send(BgEvent::UninstallExecuted { app_name, dry_run: false, trashed, failed });
+            let _ = tx.send(BgEvent::UninstallExecuted {
+                app_name,
+                dry_run: false,
+                trashed,
+                failed,
+            });
         });
     }
 
@@ -587,7 +633,12 @@ impl App {
                     } else {
                         entry.metadata().map(|m| m.len()).unwrap_or(0)
                     };
-                    entries.push(ExploreEntry { path, name, size, is_dir });
+                    entries.push(ExploreEntry {
+                        path,
+                        name,
+                        size,
+                        is_dir,
+                    });
                 }
             }
             entries.sort_by_key(|e| std::cmp::Reverse(e.size));
@@ -596,8 +647,12 @@ impl App {
     }
 
     fn start_explore_delete(&mut self) {
-        let Some(idx) = self.explore_confirm_delete.take() else { return };
-        let Some(entry) = self.explore_entries.get(idx) else { return };
+        let Some(idx) = self.explore_confirm_delete.take() else {
+            return;
+        };
+        let Some(entry) = self.explore_entries.get(idx) else {
+            return;
+        };
         let path = entry.path.clone();
         let name = entry.name.clone();
 

@@ -1,8 +1,8 @@
+use crate::core::cmd::run_cmd;
 use anyhow::Result;
 use colored::Colorize;
-use comfy_table::{Table, presets::UTF8_BORDERS_ONLY};
+use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
 use std::collections::HashMap;
-use crate::core::cmd::run_cmd;
 
 pub fn run(proc_filter: Option<&str>) -> Result<()> {
     println!("\n{}", "[ Active Network Connections ]".cyan().bold());
@@ -33,7 +33,7 @@ pub fn run(proc_filter: Option<&str>) -> Result<()> {
         }
 
         let proto = parts[7].to_string();
-        let addr  = parts[8].to_string();
+        let addr = parts[8].to_string();
 
         // State is sometimes appended in parentheses at the end: "(ESTABLISHED)"
         let state = parts
@@ -67,9 +67,9 @@ pub fn run(proc_filter: Option<&str>) -> Result<()> {
         for (proto, addr, state) in conns {
             let state_colored = match state.as_str() {
                 "ESTABLISHED" => state.green().to_string(),
-                "LISTEN"      => state.yellow().to_string(),
-                ""            => String::new(),
-                other         => other.dimmed().to_string(),
+                "LISTEN" => state.yellow().to_string(),
+                "" => String::new(),
+                other => other.dimmed().to_string(),
             };
             table.add_row(vec![proto.clone(), addr.clone(), state_colored]);
         }

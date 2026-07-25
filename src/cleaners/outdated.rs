@@ -1,8 +1,8 @@
-use anyhow::Result;
-use colored::Colorize;
-use comfy_table::{Table, presets::UTF8_BORDERS_ONLY};
 use crate::core::cmd::run_as_user;
 use crate::ui::{print_ok, print_warn};
+use anyhow::Result;
+use colored::Colorize;
+use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
 
 pub fn run() -> Result<()> {
     println!("\n{}", "[ Outdated Packages ]".cyan().bold());

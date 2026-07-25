@@ -1,14 +1,18 @@
-use std::path::PathBuf;
-use anyhow::Result;
-use crate::core::{AnalysisResult, Cleaner};
 use crate::core::fs::{dir_size, remove_dir_contents};
+use crate::core::{AnalysisResult, Cleaner};
 use crate::ui;
+use anyhow::Result;
+use std::path::PathBuf;
 
 pub struct CargoCacheCleaner;
 
 impl Cleaner for CargoCacheCleaner {
-    fn name(&self) -> &str { "cargo" }
-    fn display_name(&self) -> &str { "Cargo Cache" }
+    fn name(&self) -> &str {
+        "cargo"
+    }
+    fn display_name(&self) -> &str {
+        "Cargo Cache"
+    }
 
     fn analyze(&self) -> Result<AnalysisResult> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -39,8 +43,12 @@ impl Cleaner for CargoCacheCleaner {
             return Ok(());
         }
         ui::print_analysis("Cargo Cache", &result.items);
-        if dry_run { return Ok(()); }
-        if !yes && !ui::confirm("Clear Cargo caches?", false)? { return Ok(()); }
+        if dry_run {
+            return Ok(());
+        }
+        if !yes && !ui::confirm("Clear Cargo caches?", false)? {
+            return Ok(());
+        }
         for item in &result.items {
             match remove_dir_contents(&item.path) {
                 Ok(_) => ui::print_ok(&format!("Cleared {}", item.label)),

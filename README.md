@@ -16,10 +16,24 @@ cargo install --git https://github.com/Ferrisama/macclean
 
 ```bash
 macclean               # interactive dashboard (TUI)
+macclean ask "why is system data huge"
+macclean ask "clean old node projects"
 macclean quick         # trash + browser + crash reports
 macclean dev           # brew + docker + node/pip/cargo + xcode + projects + zsh
 macclean deep          # everything
 macclean health        # one-page system snapshot
+macclean system-data   # explain why System Data/storage is large
+macclean system-data --path ~/Library --depth 2 --limit 8
+macclean history       # recent Trash-backed cleanup sessions
+macclean restore       # restore the latest Trash-backed cleanup session
+macclean projects --path ~/code --only node --older-than-days 30
+macclean uninstall --path /Applications/Foo.app --deep
+macclean largest --path ~/Downloads --trash
+macclean dupes --path ~/Pictures --trash --keep newest
+macclean plan create downloads ~/Downloads/old.dmg ~/Downloads/old.pkg
+macclean plan apply downloads --yes
+macclean profile create-project dev-safe --path ~/code --only node,rust --older-than-days 30
+macclean profile run dev-safe --yes
 ```
 
 Every command above also works non-interactively for scripting -- the dashboard is purely what launches when you run `macclean` with no subcommand.
@@ -39,7 +53,7 @@ Running `macclean` with no arguments opens a full-screen dashboard with four tab
 
 Analyzing, scanning, and building an uninstall plan all run in the background, so switching tabs or typing is never blocked waiting on a scan to finish.
 
-**Uninstall and Explore's delete move items to the macOS Trash, not a permanent delete** -- recoverable via Finder. The cache/log cleaners (Clean tab and all the `macclean <category>` commands below) delete immediately and permanently, since that data is disposable and regenerates on its own; moving multi-GB caches to Trash wouldn't even free the space until Trash is emptied.
+`macclean` shows each cleanup item's type, risk, and reason before removal. User-data-adjacent cleanups such as app leftovers, project artifacts, installers, iOS backups, duplicate fonts, Xcode data, and ZSH completion files move items to the macOS Trash and are recorded in cleanup history. Cache/log cleaners delete immediately and permanently where moving cache contents to Trash would not free space until Trash is emptied.
 
 ---
 
@@ -54,6 +68,7 @@ Analyzing, scanning, and building an uninstall plan all run in the background, s
 | `macclean browser` | Safari, Chrome, Firefox, Brave caches |
 | `macclean xcode` | DerivedData, simulators, device support |
 | `macclean docker` | Unused images, volumes, containers, build cache |
+| `macclean android` | Android SDK/build caches |
 | `macclean brew` | Homebrew download cache + autoremove |
 | `macclean node` | npm, yarn, pnpm caches |
 | `macclean pip` | Python pip download cache |
@@ -82,6 +97,8 @@ Analyzing, scanning, and building an uninstall plan all run in the background, s
 | `macclean health` | CPU, memory, disk, battery, security at a glance |
 | `macclean largest` | Biggest files on disk (`--min-mb 500`) |
 | `macclean dupes` | Duplicate files by content hash (`--min 10`) |
+| `macclean system-data` | Categorized System Data estimate and storage tree (`--path`, `--depth`, `--limit`) |
+| `macclean ask "<request>"` | Offline natural-language command router; shows the planned command before running |
 | `macclean outdated` | Outdated brew/pip/npm packages |
 | `macclean wifi` | Wi-Fi signal, channel, DNS |
 
@@ -100,9 +117,16 @@ Analyzing, scanning, and building an uninstall plan all run in the background, s
 
 | Command | What it does |
 |---|---|
-| `macclean uninstall <App>` | Move app + all associated Library locations to Trash |
+| `macclean uninstall <App>` | Move app + associated Library locations to Trash |
+| `macclean uninstall --path /Applications/Foo.app --deep` | Deep app uninstall scan including helpers, receipts, group containers, launch items |
 | `macclean update` | Upgrade brew + pip + npm packages |
 | `macclean quit-apps` | Quit configured apps before sleep/travel |
+| `macclean history` | Show recent Trash-backed cleanup records |
+| `macclean restore [session]` | Restore the latest or named Trash-backed cleanup session when items still exist in Trash |
+| `macclean plan create <name> <paths...>` | Save exact preselected paths as a fast reusable Trash-backed plan |
+| `macclean plan apply <name>` | Validate and apply a saved plan |
+| `macclean profile create-project <name>` | Save reusable project-cleanup rules |
+| `macclean profile run <name>` | Re-scan and run a saved project cleanup profile |
 
 ---
 
@@ -111,6 +135,11 @@ Analyzing, scanning, and building an uninstall plan all run in the background, s
 ```bash
 macclean --dry-run trash    # preview without deleting
 macclean --yes deep         # skip all confirmations
+macclean -n projects --path ~/code --only node,python --exclude ~/code/client --older-than-days 30
+macclean -n uninstall --bundle-id com.example.App --deep
+macclean dupes --path ~/Downloads --trash --keep shortest
+macclean -n plan apply downloads
+macclean profile create-project dev-safe --path ~/code --only node,python --exclude ~/code/client --older-than-days 30
 ```
 
 ---

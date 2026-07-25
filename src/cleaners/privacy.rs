@@ -1,8 +1,8 @@
+use crate::cleaners::security::map_service;
+use crate::core::cmd::run_cmd;
 use anyhow::Result;
 use colored::Colorize;
-use comfy_table::{Table, presets::UTF8_BORDERS_ONLY};
-use crate::core::cmd::run_cmd;
-use crate::cleaners::security::map_service;
+use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
 
 fn map_auth(v: &str) -> &'static str {
     match v.trim() {
@@ -10,12 +10,15 @@ fn map_auth(v: &str) -> &'static str {
         "1" => "Unknown",
         "2" => "Allowed",
         "3" => "Limited",
-        _   => "Unknown",
+        _ => "Unknown",
     }
 }
 
 fn query_tcc(label: &str, db_path: &std::path::Path) {
-    println!("\n{}", format!("[ App Permissions — {} ]", label).cyan().bold());
+    println!(
+        "\n{}",
+        format!("[ App Permissions — {} ]", label).cyan().bold()
+    );
 
     if !db_path.exists() {
         println!("  Database not accessible: {}", db_path.display());
@@ -46,13 +49,13 @@ fn query_tcc(label: &str, db_path: &std::path::Path) {
             continue;
         }
         let service = map_service(parts[0].trim());
-        let client  = parts[1].trim();
-        let status  = map_auth(parts[2].trim());
+        let client = parts[1].trim();
+        let status = map_auth(parts[2].trim());
 
         let status_colored = match status {
             "Allowed" => status.green().to_string(),
-            "Denied"  => status.red().to_string(),
-            _         => status.yellow().to_string(),
+            "Denied" => status.red().to_string(),
+            _ => status.yellow().to_string(),
         };
 
         table.add_row(vec![
@@ -68,7 +71,7 @@ pub fn run() -> Result<()> {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
 
     let user_db = home.join("Library/Application Support/com.apple.TCC/TCC.db");
-    let sys_db  = std::path::PathBuf::from("/Library/Application Support/com.apple.TCC/TCC.db");
+    let sys_db = std::path::PathBuf::from("/Library/Application Support/com.apple.TCC/TCC.db");
 
     query_tcc("User", &user_db);
     query_tcc("System", &sys_db);

@@ -1,14 +1,18 @@
+use crate::core::{AnalysisResult, CleanItem, CleanKind, Cleaner, RiskLevel};
+use crate::ui;
+use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use anyhow::Result;
-use crate::core::{AnalysisResult, Cleaner, CleanItem};
-use crate::ui;
 
 pub struct FontsCleaner;
 
 impl Cleaner for FontsCleaner {
-    fn name(&self) -> &str { "fonts" }
-    fn display_name(&self) -> &str { "Duplicate Fonts" }
+    fn name(&self) -> &str {
+        "fonts"
+    }
+    fn display_name(&self) -> &str {
+        "Duplicate Fonts"
+    }
 
     fn analyze(&self) -> Result<AnalysisResult> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -26,14 +30,18 @@ impl Cleaner for FontsCleaner {
         let mut filename_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
 
         for dir in &font_dirs {
-            if !dir.exists() { continue; }
+            if !dir.exists() {
+                continue;
+            }
             let entries = match std::fs::read_dir(dir) {
                 Ok(e) => e,
                 Err(_) => continue,
             };
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
-                if !path.is_file() { continue; }
+                if !path.is_file() {
+                    continue;
+                }
                 let ext = path
                     .extension()
                     .map(|e| e.to_string_lossy().to_lowercase())
@@ -51,7 +59,9 @@ impl Cleaner for FontsCleaner {
         // For duplicates, add only user-installed copies (those under ~/Library/Fonts)
         let user_font_dir = home.join("Library/Fonts");
         for paths in filename_map.values() {
-            if paths.len() <= 1 { continue; }
+            if paths.len() <= 1 {
+                continue;
+            }
             for path in paths {
                 if path.starts_with(&user_font_dir) {
                     let parent = path
@@ -68,6 +78,9 @@ impl Cleaner for FontsCleaner {
                         path: path.clone(),
                         size_bytes: size,
                         removable: true,
+                        kind: CleanKind::Duplicate,
+                        risk: RiskLevel::Medium,
+                        reason: "User font has the same filename as another installed font.".into(),
                     });
                 }
             }
@@ -83,13 +96,17 @@ impl Cleaner for FontsCleaner {
         }
         ui::print_analysis("Duplicate Fonts", &result.items);
         ui::print_warn("Only user-installed duplicates shown. System fonts will not be touched.");
-        if dry_run { return Ok(()); }
-        if !yes && !ui::confirm("Remove duplicate user fonts?", false)? { return Ok(()); }
+        if dry_run {
+            return Ok(());
+        }
+        if !yes && !ui::confirm("Remove duplicate user fonts?", false)? {
+            return Ok(());
+        }
 
-        for item in &result.items {
-            match std::fs::remove_file(&item.path) {
-                Ok(_) => ui::print_ok(&format!("Removed {}", item.label)),
-                Err(e) => ui::print_warn(&format!("{}: {}", item.label, e)),
+        for (path, outcome) in crate::core::trash::trash_clean_items("fonts", &result.items) {
+            match outcome {
+                Ok(_) => ui::print_ok(&format!("Moved to Trash: {}", path.display())),
+                Err(e) => ui::print_warn(&format!("{}: {}", path.display(), e)),
             }
         }
         Ok(())

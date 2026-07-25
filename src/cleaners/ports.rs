@@ -1,8 +1,8 @@
+use crate::core::cmd::run_cmd;
 use anyhow::Result;
 use colored::Colorize;
-use comfy_table::{Table, presets::UTF8_BORDERS_ONLY};
+use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
 use std::collections::HashSet;
-use crate::core::cmd::run_cmd;
 
 pub fn run() -> Result<()> {
     println!("\n{}", "[ Listening Ports ]".cyan().bold());
@@ -25,9 +25,9 @@ pub fn run() -> Result<()> {
             continue;
         }
         let process = parts[0].to_string();
-        let pid     = parts[1].to_string();
-        let proto   = parts[7].to_string();
-        let addr    = parts[8].to_string();
+        let pid = parts[1].to_string();
+        let proto = parts[7].to_string();
+        let addr = parts[8].to_string();
 
         let key = (process.clone(), addr.clone());
         if seen.contains(&key) {

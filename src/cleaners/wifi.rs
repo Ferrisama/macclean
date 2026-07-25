@@ -1,9 +1,10 @@
+use crate::core::cmd::run_cmd;
 use anyhow::Result;
 use colored::Colorize;
-use comfy_table::{Table, presets::UTF8_BORDERS_ONLY};
-use crate::core::cmd::run_cmd;
+use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
 
-const AIRPORT: &str = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
+const AIRPORT: &str =
+    "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
 
 fn signal_quality(dbm: i64) -> &'static str {
     if dbm >= -50 {
@@ -37,10 +38,12 @@ pub fn run() -> Result<()> {
 
     let lines: Vec<&str> = airport_r.output.lines().collect();
 
-    let ssid      = airport_val(&lines, "SSID").unwrap_or("N/A").to_string();
-    let bssid     = airport_val(&lines, "BSSID").unwrap_or("N/A").to_string();
-    let channel   = airport_val(&lines, "channel").unwrap_or("N/A").to_string();
-    let tx_rate   = airport_val(&lines, "lastTxRate").unwrap_or("N/A").to_string();
+    let ssid = airport_val(&lines, "SSID").unwrap_or("N/A").to_string();
+    let bssid = airport_val(&lines, "BSSID").unwrap_or("N/A").to_string();
+    let channel = airport_val(&lines, "channel").unwrap_or("N/A").to_string();
+    let tx_rate = airport_val(&lines, "lastTxRate")
+        .unwrap_or("N/A")
+        .to_string();
     let noise_raw = airport_val(&lines, "noise").unwrap_or("N/A").to_string();
 
     let signal_raw = airport_val(&lines, "agrCtlRSSI")
@@ -91,14 +94,14 @@ pub fn run() -> Result<()> {
     table.set_header(vec!["Field", "Value"]);
 
     let rows = [
-        ("SSID",       ssid),
-        ("Interface",  iface),
-        ("Signal",     signal_label),
-        ("Noise",      noise_raw),
-        ("Channel",    channel),
-        ("BSSID",      bssid),
-        ("TX Rate",    format!("{} Mbps", tx_rate)),
-        ("DNS Servers",dns_str),
+        ("SSID", ssid),
+        ("Interface", iface),
+        ("Signal", signal_label),
+        ("Noise", noise_raw),
+        ("Channel", channel),
+        ("BSSID", bssid),
+        ("TX Rate", format!("{} Mbps", tx_rate)),
+        ("DNS Servers", dns_str),
     ];
 
     for (k, v) in &rows {
