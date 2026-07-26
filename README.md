@@ -176,3 +176,8 @@ Maintainer release, signing, notarization, and Homebrew formula steps are in
 ## License
 
 MIT
+
+
+
+
+.
