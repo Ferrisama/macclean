@@ -12,7 +12,7 @@ pub fn trash_paths(paths: &[PathBuf]) -> Vec<(PathBuf, Result<(), String>)> {
     paths
         .iter()
         .filter(|p| p.exists())
-        .map(|p| (p.clone(), trash_one(p)))
+        .map(|p| (p.clone(), trash_one(p).map(|_| ())))
         .collect()
 }
 
@@ -27,32 +27,45 @@ pub fn trash_clean_items(cleaner: &str, items: &[CleanItem]) -> Vec<(PathBuf, Re
         .for_each(|item| {
             let path = item.path.clone();
             if let Err(e) = safety::validate_removal(&path) {
-                receipt_items.push(receipt_item(item, "trash", "failed", Some(&e)));
+                receipt_items.push(receipt_item(item, "trash", "failed", Some(&e), None));
                 outcomes.push((path, Err(e)));
                 return;
             }
             let result = trash_one(&path);
-            if result.is_ok() {
+            if let Ok(trash_path) = &result {
                 let record = history::HistoryRecord::new(
                     &session_id,
                     cleaner,
                     &item.label,
                     path.clone(),
+                    trash_path.clone(),
                     item.size_bytes,
                     "trash",
                 );
                 if let Err(e) = history::append(&record) {
                     let err = format!("moved to Trash but failed to record history: {}", e);
-                    receipt_items.push(receipt_item(item, "trash", "history_failed", Some(&err)));
+                    receipt_items.push(receipt_item(
+                        item,
+                        "trash",
+                        "history_failed",
+                        Some(&err),
+                        trash_path.as_deref(),
+                    ));
                     outcomes.push((path, Err(err)));
                     return;
                 }
             }
             match &result {
-                Ok(()) => receipt_items.push(receipt_item(item, "trash", "moved", None)),
-                Err(e) => receipt_items.push(receipt_item(item, "trash", "failed", Some(e))),
+                Ok(trash_path) => receipt_items.push(receipt_item(
+                    item,
+                    "trash",
+                    "moved",
+                    None,
+                    trash_path.as_deref(),
+                )),
+                Err(e) => receipt_items.push(receipt_item(item, "trash", "failed", Some(e), None)),
             }
-            outcomes.push((path, result));
+            outcomes.push((path, result.map(|_| ())));
         });
 
     if !receipt_items.is_empty() {
@@ -62,8 +75,37 @@ pub fn trash_clean_items(cleaner: &str, items: &[CleanItem]) -> Vec<(PathBuf, Re
     outcomes
 }
 
-fn trash_one(path: &Path) -> Result<(), String> {
-    trash::delete(path).map_err(|e| e.to_string())
+#[cfg(target_os = "macos")]
+fn trash_one(path: &Path) -> Result<Option<PathBuf>, String> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+
+    let path_text = path
+        .to_str()
+        .ok_or_else(|| format!("cleanup path is not valid UTF-8: {}", path.display()))?;
+    let source_url = NSURL::fileURLWithPath(&NSString::from_str(path_text));
+    let mut resulting_url = None;
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&source_url, Some(&mut resulting_url))
+        .map_err(|error| {
+            format!(
+                "macOS could not move {} to Trash: {}",
+                path.display(),
+                error
+            )
+        })?;
+    let destination = resulting_url
+        .and_then(|url| url.path())
+        .map(|path| PathBuf::from(path.to_string()))
+        .ok_or_else(|| {
+            "macOS moved the item but did not return its Trash destination".to_string()
+        })?;
+    Ok(Some(destination))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn trash_one(path: &Path) -> Result<Option<PathBuf>, String> {
+    trash::delete(path).map_err(|e| e.to_string())?;
+    Ok(None)
 }
 
 fn receipt_item(
@@ -71,8 +113,9 @@ fn receipt_item(
     method: &str,
     status: &str,
     error: Option<&str>,
+    trash_path: Option<&Path>,
 ) -> history::ReceiptItem {
-    let restore = if status == "moved" {
+    let restore = if trash_path.is_some() {
         "available after Trash move"
     } else {
         "not available"
@@ -85,5 +128,6 @@ fn receipt_item(
         status: status.into(),
         restore: restore.into(),
         error: error.map(str::to_string),
+        trash_path: trash_path.map(Path::to_path_buf),
     }
 }

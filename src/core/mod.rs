@@ -1,3 +1,4 @@
+pub mod app_scan;
 pub mod cmd;
 pub mod fs;
 pub mod history;

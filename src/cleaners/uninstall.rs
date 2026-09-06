@@ -8,6 +8,7 @@ use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
 use std::path::{Path, PathBuf};
 
 /// One path found to belong to an app, with its size on disk.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TraceItem {
     pub path: PathBuf,
     pub size_bytes: u64,
@@ -17,6 +18,7 @@ pub struct TraceItem {
 
 /// The result of scanning for an app and everything associated with it,
 /// built once and shared between the CLI and TUI front ends.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct UninstallPlan {
     pub app_name: String,
     pub bundle_id: String,
@@ -24,6 +26,15 @@ pub struct UninstallPlan {
     pub app_path: PathBuf,
     pub items: Vec<TraceItem>,
     pub total_size: u64,
+    pub deep: bool,
+    pub running_processes: Vec<RunningProcess>,
+    pub can_execute: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunningProcess {
+    pub pid: u32,
+    pub command: String,
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +150,7 @@ pub fn build_plan(app_name: &str) -> Result<UninstallPlan> {
 }
 
 pub fn build_plan_with_options(options: UninstallOptions) -> Result<UninstallPlan> {
+    let deep = options.deep;
     let app_path = if let Some(path) = options.app_path {
         path
     } else if let Some(bundle_id) = &options.bundle_id {
@@ -215,7 +227,7 @@ pub fn build_plan_with_options(options: UninstallOptions) -> Result<UninstallPla
         }
     }
 
-    if options.deep {
+    if deep {
         for (dir, reason, risk) in deep_scan_dirs(&home) {
             for path in find_traces(&dir, &bundle_id, &app_name) {
                 to_remove.push((path, reason.to_string(), risk));
@@ -253,6 +265,9 @@ pub fn build_plan_with_options(options: UninstallOptions) -> Result<UninstallPla
         })
         .collect();
 
+    let running_processes = find_running_processes(&app_path);
+    let can_execute = running_processes.is_empty();
+
     Ok(UninstallPlan {
         app_name,
         bundle_id,
@@ -260,6 +275,9 @@ pub fn build_plan_with_options(options: UninstallOptions) -> Result<UninstallPla
         app_path,
         items,
         total_size,
+        deep,
+        running_processes,
+        can_execute,
     })
 }
 
@@ -334,7 +352,7 @@ fn find_receipts(bundle_id: &str, app_name: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-fn is_protected_app(app_path: &Path) -> bool {
+pub fn is_protected_app(app_path: &Path) -> bool {
     if app_path.starts_with("/System") {
         return true;
     }
@@ -416,6 +434,9 @@ pub fn run_with_options(options: UninstallOptions, dry_run: bool, yes: bool) -> 
     }
 
     warn_if_running(&plan);
+    if !plan.can_execute {
+        bail!("Quit {} before uninstalling it.", plan.app_name);
+    }
 
     if !yes {
         let prompt = format!("Move {} and all its files to the Trash?", plan.app_name);
@@ -435,17 +456,48 @@ pub fn run_with_options(options: UninstallOptions, dry_run: bool, yes: bool) -> 
     Ok(())
 }
 
+fn find_running_processes(app_path: &Path) -> Vec<RunningProcess> {
+    let pattern = format!("{}/Contents/", app_path.display());
+    let result = run_cmd(&["pgrep", "-ifl", &pattern]);
+    if !result.success() {
+        return Vec::new();
+    }
+    parse_running_processes(&result.output)
+}
+
+fn parse_running_processes(output: &str) -> Vec<RunningProcess> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (pid, command) = line.trim().split_once(char::is_whitespace)?;
+            Some(RunningProcess {
+                pid: pid.parse().ok()?,
+                command: command.trim().to_string(),
+            })
+        })
+        .collect()
+}
+
 fn warn_if_running(plan: &UninstallPlan) {
-    let process_name = plan
-        .app_path
-        .file_stem()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| plan.app_name.clone());
-    let result = run_cmd(&["pgrep", "-if", &process_name]);
-    if result.success() && !result.output.trim().is_empty() {
+    if !plan.running_processes.is_empty() {
         print_warn(&format!(
             "{} appears to be running. Quit it before confirming uninstall.",
-            process_name
+            plan.app_name
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_running_process_lines() {
+        let processes = parse_running_processes(
+            "123 /Applications/Example.app/Contents/MacOS/Example --flag\n456 helper process\n",
+        );
+        assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0].pid, 123);
+        assert!(processes[0].command.contains("Example.app"));
     }
 }

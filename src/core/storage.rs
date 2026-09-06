@@ -1,29 +1,22 @@
 use anyhow::{bail, Result};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::fs::Metadata;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 use crate::core::fs::dir_size;
+use crate::core::CleanKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ScanMode {
     Fast,
     Deep,
-}
-
-impl ScanMode {
-    pub fn budget(self) -> Option<Duration> {
-        match self {
-            ScanMode::Fast => Some(Duration::from_secs(8)),
-            ScanMode::Deep => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +28,8 @@ pub struct StorageScan {
     pub scanned_at: u64,
     pub elapsed_ms: u128,
     pub partial: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incomplete_reason: Option<String>,
     pub tree: StorageNode,
 }
 
@@ -46,6 +41,10 @@ pub struct StorageNode {
     pub percent_of_parent: f64,
     pub is_dir: bool,
     pub partial: bool,
+    pub safety: StorageSafety,
+    pub clean_kind: CleanKind,
+    pub cleanup_action: String,
+    pub cleanup_reason: String,
     pub children: Vec<StorageNode>,
 }
 
@@ -54,6 +53,8 @@ pub struct StorageCategory {
     pub name: String,
     pub size_bytes: u64,
     pub percent_of_total: f64,
+    pub safety: StorageSafety,
+    pub clean_kind: CleanKind,
     pub paths: Vec<PathBuf>,
     pub why: String,
     pub clean_with: String,
@@ -75,16 +76,69 @@ struct CategoryDef {
     paths: Vec<PathBuf>,
     why: &'static str,
     clean_with: &'static str,
+    safety: StorageSafety,
+    clean_kind: CleanKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StorageSafety {
+    Safe,
+    Review,
+    UserData,
+    Protected,
+    Unknown,
+}
+
+impl StorageSafety {
+    pub fn label(self) -> &'static str {
+        match self {
+            StorageSafety::Safe => "safe",
+            StorageSafety::Review => "review",
+            StorageSafety::UserData => "user data",
+            StorageSafety::Protected => "protected",
+            StorageSafety::Unknown => "unknown",
+        }
+    }
 }
 
 pub fn scan_tree(root: PathBuf, depth: usize, limit: usize, mode: ScanMode) -> Result<StorageScan> {
+    scan_tree_with_progress(root, depth, limit, mode, None)
+}
+
+pub fn scan_tree_with_progress(
+    root: PathBuf,
+    depth: usize,
+    limit: usize,
+    mode: ScanMode,
+    progress: Option<&(dyn Fn(&Path, u64, bool, usize, usize) + Sync)>,
+) -> Result<StorageScan> {
     if !root.exists() {
         bail!("Path does not exist: {}", root.display());
     }
     let start = Instant::now();
-    let deadline = mode.budget().map(|budget| start + budget);
-    let mut tree = build_node(&root, depth, limit, deadline, None)?;
+    if mode == ScanMode::Fast {
+        let mut tree = build_fast_tree(&root, depth, limit, progress)?;
+        set_child_percentages(&mut tree);
+        let partial = tree.partial;
+        return Ok(StorageScan {
+            root,
+            mode,
+            depth,
+            limit,
+            scanned_at: now_secs(),
+            elapsed_ms: start.elapsed().as_millis(),
+            partial,
+            incomplete_reason: partial.then(|| {
+                "One or more paths could not be fully read or sized; totals may be incomplete."
+                    .into()
+            }),
+            tree,
+        });
+    }
+    let mut tree = build_node(&root, depth, limit, None, None, progress, 0, 0)?;
     set_child_percentages(&mut tree);
+    let partial = tree.partial;
     Ok(StorageScan {
         root,
         mode,
@@ -92,33 +146,34 @@ pub fn scan_tree(root: PathBuf, depth: usize, limit: usize, mode: ScanMode) -> R
         limit,
         scanned_at: now_secs(),
         elapsed_ms: start.elapsed().as_millis(),
-        partial: tree.partial,
+        partial,
+        incomplete_reason: partial.then(|| {
+            "One or more paths could not be fully read or sized; totals may be incomplete.".into()
+        }),
         tree,
     })
 }
 
-pub fn scan_system_data(mode: ScanMode) -> SystemDataScan {
+pub fn scan_system_data(_mode: ScanMode) -> SystemDataScan {
     let start = Instant::now();
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let mut partial = false;
     let definitions = category_defs(&home);
-    let per_category_budget = mode
-        .budget()
-        .map(|budget| budget / definitions.len().max(1) as u32);
     let mut categories: Vec<_> = definitions
         .into_iter()
         .map(|category| {
-            let deadline = per_category_budget.map(|budget| Instant::now() + budget);
             let (size, category_partial) = match category.name {
-                "Downloads Installers" => installers_size(&category.paths, deadline),
-                "Containers" => containers_size(&home, &category.paths, deadline),
-                _ => paths_size(&category.paths, deadline),
+                "Downloads Installers" => installers_size(&category.paths, None),
+                "Containers" => containers_size(&home, &category.paths, None),
+                _ => paths_size(&category.paths, None),
             };
             partial |= category_partial;
             StorageCategory {
                 name: category.name.into(),
                 size_bytes: size,
                 percent_of_total: 0.0,
+                safety: category.safety,
+                clean_kind: category.clean_kind,
                 paths: category.paths,
                 why: category.why.into(),
                 clean_with: category.clean_with.into(),
@@ -160,6 +215,13 @@ pub fn write_system_data_cache(scan: &SystemDataScan) -> Result<PathBuf> {
     Ok(path)
 }
 
+pub fn app_cleanup_allowed(path: &Path) -> bool {
+    matches!(
+        classify_storage_path(path, path.is_dir()).safety,
+        StorageSafety::Safe | StorageSafety::Review
+    )
+}
+
 fn cache_dir() -> Result<PathBuf> {
     let Some(home) = dirs::home_dir() else {
         bail!("Could not find home directory.");
@@ -173,10 +235,18 @@ fn build_node(
     limit: usize,
     deadline: Option<Instant>,
     known_size: Option<u64>,
+    progress: Option<&(dyn Fn(&Path, u64, bool, usize, usize) + Sync)>,
+    completed: usize,
+    total: usize,
 ) -> Result<StorageNode> {
-    let (size_bytes, mut partial) = match known_size {
-        Some(size) => (size, false),
-        None => bounded_path_size(path, deadline),
+    let is_dir = path.is_dir();
+    let (size_bytes, mut partial) = if depth == 0 || !is_dir {
+        match known_size {
+            Some(size) => (size, false),
+            None => bounded_path_size(path, deadline),
+        }
+    } else {
+        (known_size.unwrap_or(0), false)
     };
     let mut node = StorageNode {
         name: path
@@ -186,33 +256,67 @@ fn build_node(
         path: path.to_path_buf(),
         size_bytes,
         percent_of_parent: 100.0,
-        is_dir: path.is_dir(),
+        is_dir,
         partial,
+        safety: StorageSafety::Unknown,
+        clean_kind: CleanKind::Unknown,
+        cleanup_action: String::new(),
+        cleanup_reason: String::new(),
         children: Vec::new(),
     };
+    let classification = classify_storage_path(path, node.is_dir);
+    node.safety = classification.safety;
+    node.clean_kind = classification.clean_kind;
+    node.cleanup_action = classification.action;
+    node.cleanup_reason = classification.reason;
 
     if depth == 0 || !node.is_dir {
         return Ok(node);
     }
 
-    let mut children = Vec::new();
-    if let Ok(read_dir) = std::fs::read_dir(path) {
-        for child in read_dir.filter_map(|e| e.ok()) {
-            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                node.partial = true;
-                break;
-            }
+    let child_paths = std::fs::read_dir(path)
+        .map(|read_dir| {
+            read_dir
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .collect()
+        })
+        .unwrap_or_else(|_| {
+            node.partial = true;
+            Vec::new()
+        });
 
-            let child_path = child.path();
-            let (child_size, child_partial) = bounded_path_size(&child_path, deadline);
-            partial |= child_partial;
-            if child_size > 0 {
-                children.push((child_path, child_size, child_partial));
-            }
+    let mut children = Vec::new();
+    for (index, child_path) in child_paths.iter().enumerate() {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            node.partial = true;
+            break;
+        }
+
+        let remaining_children = child_paths.len().saturating_sub(index).max(1);
+        let child_deadline = per_child_deadline(deadline, remaining_children);
+        let (child_size, child_partial) = bounded_path_size(child_path, child_deadline);
+        partial |= child_partial;
+        if let Some(progress) = progress {
+            progress(
+                child_path,
+                child_size,
+                child_partial,
+                completed + index + 1,
+                total.max(child_paths.len()),
+            );
+        }
+        if child_size > 0 {
+            children.push((child_path.clone(), child_size, child_partial));
         }
     }
 
     children.sort_by_key(|(_, size, _)| std::cmp::Reverse(*size));
+    let measured_size = children
+        .iter()
+        .fold(0u64, |total, (_, size, _)| total.saturating_add(*size));
+    if known_size.is_none() {
+        node.size_bytes = measured_size;
+    }
     children.truncate(limit);
 
     node.children = children
@@ -224,6 +328,9 @@ fn build_node(
                 limit,
                 deadline,
                 Some(child_size),
+                progress,
+                completed + 1,
+                total.max(child_paths.len()),
             )
             .ok()?;
             child.partial |= child_partial;
@@ -232,6 +339,89 @@ fn build_node(
         .collect();
     node.partial |= partial || node.children.iter().any(|child| child.partial);
     Ok(node)
+}
+
+fn build_fast_tree(
+    root: &Path,
+    _depth: usize,
+    limit: usize,
+    progress: Option<&(dyn Fn(&Path, u64, bool, usize, usize) + Sync)>,
+) -> Result<StorageNode> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if !root.is_dir() {
+        return build_node(&root, 0, limit, None, None, progress, 0, 0);
+    }
+
+    let mut root_node = classified_node(&root, 0, true, false);
+    let child_paths: Vec<PathBuf> = fs::read_dir(&root)
+        .map(|read_dir| {
+            read_dir
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .collect()
+        })
+        .unwrap_or_else(|_| {
+            root_node.partial = true;
+            Vec::new()
+        });
+
+    let completed = std::sync::atomic::AtomicUsize::new(0);
+    let total = child_paths.len();
+    let mut children: Vec<_> = child_paths
+        .par_iter()
+        .filter_map(|child| {
+            let is_dir = child.is_dir();
+            let (size, partial) = bounded_path_size(child, None);
+            if let Some(progress) = progress {
+                let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                progress(child, size, partial, done, total);
+            }
+            (size > 0).then(|| classified_node(child, size, is_dir, partial))
+        })
+        .collect();
+
+    children.sort_by_key(|child| std::cmp::Reverse(child.size_bytes));
+    root_node.partial |= children.iter().any(|child| child.partial);
+    root_node.size_bytes = children
+        .iter()
+        .fold(0u64, |total, child| total.saturating_add(child.size_bytes));
+    children.truncate(limit);
+    root_node.children = children;
+    Ok(root_node)
+}
+
+pub(crate) fn classified_node(
+    path: &Path,
+    size_bytes: u64,
+    is_dir: bool,
+    partial: bool,
+) -> StorageNode {
+    let classification = classify_storage_path(path, is_dir);
+    StorageNode {
+        name: path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string()),
+        path: path.to_path_buf(),
+        size_bytes,
+        percent_of_parent: 100.0,
+        is_dir,
+        partial,
+        safety: classification.safety,
+        clean_kind: classification.clean_kind,
+        cleanup_action: classification.action,
+        cleanup_reason: classification.reason,
+        children: Vec::new(),
+    }
+}
+
+fn per_child_deadline(deadline: Option<Instant>, remaining_children: usize) -> Option<Instant> {
+    let deadline = deadline?;
+    let now = Instant::now();
+    if now >= deadline {
+        return Some(now);
+    }
+    let remaining = deadline.saturating_duration_since(now);
+    Some(now + (remaining / remaining_children.max(1) as u32))
 }
 
 fn set_child_percentages(node: &mut StorageNode) {
@@ -344,12 +534,16 @@ fn category_defs(home: &Path) -> Vec<CategoryDef> {
             ],
             why: "DerivedData, simulators, device support, archives.",
             clean_with: "macclean xcode",
+            safety: StorageSafety::Review,
+            clean_kind: CleanKind::DevArtifact,
         },
         CategoryDef {
             name: "iOS Backups",
             paths: vec![home.join("Library/Application Support/MobileSync/Backup")],
             why: "Local iPhone/iPad backup copies.",
             clean_with: "macclean ios-backups",
+            safety: StorageSafety::Review,
+            clean_kind: CleanKind::Backup,
         },
         CategoryDef {
             name: "Docker",
@@ -359,12 +553,16 @@ fn category_defs(home: &Path) -> Vec<CategoryDef> {
             ],
             why: "Images, volumes, containers, build cache.",
             clean_with: "macclean docker",
+            safety: StorageSafety::Review,
+            clean_kind: CleanKind::DevArtifact,
         },
         CategoryDef {
             name: "Application Support",
             paths: vec![home.join("Library/Application Support")],
             why: "App databases, media, indexes, local state.",
             clean_with: "macclean system-data --path",
+            safety: StorageSafety::UserData,
+            clean_kind: CleanKind::Unknown,
         },
         CategoryDef {
             name: "Containers",
@@ -374,6 +572,8 @@ fn category_defs(home: &Path) -> Vec<CategoryDef> {
             ],
             why: "Sandboxed app data and group containers.",
             clean_with: "review; uninstall unused apps",
+            safety: StorageSafety::Review,
+            clean_kind: CleanKind::AppTrace,
         },
         CategoryDef {
             name: "Caches",
@@ -383,6 +583,8 @@ fn category_defs(home: &Path) -> Vec<CategoryDef> {
             ],
             why: "Regenerable app and system cache files.",
             clean_with: "macclean system/browser",
+            safety: StorageSafety::Safe,
+            clean_kind: CleanKind::Cache,
         },
         CategoryDef {
             name: "Developer Caches",
@@ -395,12 +597,16 @@ fn category_defs(home: &Path) -> Vec<CategoryDef> {
             ],
             why: "Package manager and build caches.",
             clean_with: "macclean dev",
+            safety: StorageSafety::Safe,
+            clean_kind: CleanKind::DevArtifact,
         },
         CategoryDef {
             name: "Android",
             paths: vec![home.join("Library/Android"), home.join(".android")],
             why: "SDK caches, emulator data, Gradle/Android tools.",
             clean_with: "macclean android",
+            safety: StorageSafety::Review,
+            clean_kind: CleanKind::DevArtifact,
         },
         CategoryDef {
             name: "Logs & Reports",
@@ -411,14 +617,254 @@ fn category_defs(home: &Path) -> Vec<CategoryDef> {
             ],
             why: "Logs, crash reports, diagnostics.",
             clean_with: "macclean crash-reports",
+            safety: StorageSafety::Safe,
+            clean_kind: CleanKind::Log,
         },
         CategoryDef {
             name: "Downloads Installers",
             paths: vec![home.join("Downloads"), home.join("Desktop")],
             why: "DMG/PKG/ZIP installers often remain after install.",
             clean_with: "macclean installers",
+            safety: StorageSafety::Review,
+            clean_kind: CleanKind::Installer,
         },
     ]
+}
+
+struct StorageClassification {
+    safety: StorageSafety,
+    clean_kind: CleanKind,
+    action: String,
+    reason: String,
+}
+
+fn classify_storage_path(path: &Path, is_dir: bool) -> StorageClassification {
+    let lower_path = path.to_string_lossy().to_lowercase();
+    let components = lowercase_components(path);
+    let lower_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    let classified = if lower_path.starts_with("/system/")
+        || lower_path.starts_with("/private/var/db/")
+        || lower_path.starts_with("/usr/")
+        || lower_path.contains("/library/keychains")
+    {
+        (
+            StorageSafety::Protected,
+            CleanKind::Unknown,
+            "Do not clean automatically.",
+            "System-owned or security-sensitive location.",
+        )
+    } else if has_component_sequence(&components, &["library", "caches"])
+        || has_component_sequence(&components, &[".cargo", "registry", "cache"])
+        || has_component_sequence(&components, &[".cargo", "registry", "src"])
+        || has_component_sequence(&components, &[".cargo", "git", "checkouts"])
+        || has_component_sequence(
+            &components,
+            &[
+                "library",
+                "application support",
+                "stremio-server",
+                "stremio-cache",
+            ],
+        )
+        || has_component_sequence(
+            &components,
+            &[
+                "library",
+                "application support",
+                "stremio-server",
+                "server-cache",
+            ],
+        )
+        || has_component_sequence(
+            &components,
+            &[
+                "library",
+                "application support",
+                "smart code ltd",
+                "stremio",
+                "cache",
+            ],
+        )
+        || has_component_sequence(
+            &components,
+            &[
+                "library",
+                "application support",
+                "smart code ltd",
+                "stremio",
+                "code cache",
+            ],
+        )
+        || has_component_sequence(
+            &components,
+            &[
+                "library",
+                "application support",
+                "smart code ltd",
+                "stremio",
+                "gpucache",
+            ],
+        )
+        || has_component_sequence(
+            &components,
+            &[
+                "library",
+                "application support",
+                "smart code ltd",
+                "stremio",
+                "dawncache",
+            ],
+        )
+        || has_component_sequence(
+            &components,
+            &[
+                "library",
+                "application support",
+                "smart code ltd",
+                "stremio",
+                "service worker",
+                "cachestorage",
+            ],
+        )
+        || has_component_sequence(
+            &components,
+            &[
+                "library",
+                "application support",
+                "smart code ltd",
+                "stremio",
+                "blob_storage",
+            ],
+        )
+    {
+        (
+            StorageSafety::Safe,
+            CleanKind::Cache,
+            "Review in Clean, then remove cache contents.",
+            "Regenerable cache data.",
+        )
+    } else if has_component_sequence(&components, &["library", "logs"])
+        || components
+            .iter()
+            .any(|component| component == "diagnosticreports")
+        || lower_name.ends_with(".log")
+    {
+        (
+            StorageSafety::Safe,
+            CleanKind::Log,
+            "Review in Clean, then remove logs or reports.",
+            "Logs and diagnostic reports are usually safe to remove.",
+        )
+    } else if has_component_sequence(
+        &components,
+        &["library", "developer", "xcode", "deriveddata"],
+    ) || components
+        .iter()
+        .any(|component| component == "node_modules")
+        || has_component_sequence(&components, &[".gradle", "caches"])
+        || has_component_sequence(&components, &[".npm", "_cacache"])
+    {
+        (
+            StorageSafety::Safe,
+            CleanKind::DevArtifact,
+            "Review in Developer cleanup.",
+            "Generated developer artifact that can usually be rebuilt.",
+        )
+    } else if lower_name == ".ollama"
+        || lower_name == ".rustup"
+        || lower_name == ".nvm"
+        || lower_name == ".pyenv"
+        || has_component_sequence(&components, &[".rustup", "toolchains"])
+        || has_component_sequence(&components, &[".nvm", "versions"])
+    {
+        (
+            StorageSafety::Review,
+            CleanKind::DevArtifact,
+            "Review installed models, runtimes, or toolchains before removing.",
+            "Developer/runtime data can be large but may be actively used.",
+        )
+    } else if components
+        .iter()
+        .any(|component| component == "com.docker.docker")
+        || components
+            .iter()
+            .any(|component| component == "coresimulator")
+        || has_component_sequence(&components, &["mobilesync", "backup"])
+        || lower_name == ".venv"
+        || lower_name == "venv"
+    {
+        (
+            StorageSafety::Review,
+            CleanKind::DevArtifact,
+            "Open a review plan before cleaning.",
+            "Often removable, but may contain workflow state or backups.",
+        )
+    } else if is_installer(path) {
+        (
+            StorageSafety::Review,
+            CleanKind::Installer,
+            "Review installer before moving to Trash.",
+            "Installers are often expendable after installation.",
+        )
+    } else if lower_path.contains("/desktop")
+        || lower_path.contains("/documents")
+        || lower_path.contains("/downloads")
+        || lower_path.contains("/movies")
+        || lower_path.contains("/music")
+        || lower_path.contains("/pictures")
+        || lower_path.contains("/photos library")
+        || lower_path.contains("/library/application support")
+    {
+        (
+            StorageSafety::UserData,
+            CleanKind::Unknown,
+            "Reveal in Finder; do not auto-select.",
+            "May contain original user or application data.",
+        )
+    } else if is_dir {
+        (
+            StorageSafety::Unknown,
+            CleanKind::Unknown,
+            "Inspect before taking action.",
+            "No known cleanup rule matched this folder.",
+        )
+    } else {
+        (
+            StorageSafety::Unknown,
+            CleanKind::Unknown,
+            "Inspect before taking action.",
+            "No known cleanup rule matched this file.",
+        )
+    };
+
+    StorageClassification {
+        safety: classified.0,
+        clean_kind: classified.1,
+        action: classified.2.to_string(),
+        reason: classified.3.to_string(),
+    }
+}
+
+fn lowercase_components(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn has_component_sequence(components: &[String], expected: &[&str]) -> bool {
+    components.windows(expected.len()).any(|window| {
+        window
+            .iter()
+            .map(String::as_str)
+            .eq(expected.iter().copied())
+    })
 }
 
 fn is_installer(path: &Path) -> bool {
@@ -480,7 +926,156 @@ mod tests {
     }
 
     #[test]
+    fn fast_scan_stays_top_level_while_deep_scan_expands_children() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("parent/child");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("file.txt"), vec![0u8; 1024]).unwrap();
+
+        let fast = scan_tree(dir.path().to_path_buf(), 4, 10, ScanMode::Fast).unwrap();
+        let deep = scan_tree(dir.path().to_path_buf(), 4, 10, ScanMode::Deep).unwrap();
+
+        assert_eq!(fast.mode, ScanMode::Fast);
+        assert_eq!(deep.mode, ScanMode::Deep);
+        assert!(fast
+            .tree
+            .children
+            .iter()
+            .all(|child| child.children.is_empty()));
+        assert!(deep
+            .tree
+            .children
+            .iter()
+            .any(|child| !child.children.is_empty()));
+    }
+
+    #[test]
+    fn scan_tree_classifies_cache_paths_as_safe() {
+        let dir = tempdir().unwrap();
+        let cache_dir = dir.path().join("Library/Caches/Foo");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("cache.bin"), vec![0u8; 1024]).unwrap();
+
+        let scan = scan_tree(dir.path().to_path_buf(), 3, 10, ScanMode::Deep).unwrap();
+        let library = scan
+            .tree
+            .children
+            .iter()
+            .find(|child| child.name == "Library")
+            .unwrap();
+        let caches = library
+            .children
+            .iter()
+            .find(|child| child.name == "Caches")
+            .unwrap();
+
+        assert_eq!(caches.safety, StorageSafety::Safe);
+        assert_eq!(caches.clean_kind, CleanKind::Cache);
+    }
+
+    #[test]
+    fn system_data_categories_include_safety_metadata() {
+        let scan = scan_system_data(ScanMode::Fast);
+        let caches = scan
+            .categories
+            .iter()
+            .find(|category| category.name == "Caches")
+            .unwrap();
+        assert_eq!(caches.safety, StorageSafety::Safe);
+        assert_eq!(caches.clean_kind, CleanKind::Cache);
+    }
+
+    #[test]
     fn percent_rounds_to_one_decimal() {
         assert_eq!(percent(1, 3), 33.3);
+    }
+
+    #[test]
+    fn cargo_git_checkouts_are_safe_app_cleanup() {
+        let path = Path::new("/Users/test/.cargo/git/checkouts");
+        assert_eq!(
+            classify_storage_path(path, true).safety,
+            StorageSafety::Safe
+        );
+        assert!(app_cleanup_allowed(path));
+    }
+
+    #[test]
+    fn stremio_cache_descendants_inherit_cache_safety() {
+        let path = Path::new(
+            "/Users/test/Library/Application Support/stremio-server/stremio-cache/hash/video",
+        );
+        assert_eq!(
+            classify_storage_path(path, true).safety,
+            StorageSafety::Safe
+        );
+        assert!(app_cleanup_allowed(path));
+    }
+
+    #[test]
+    fn ordinary_application_support_remains_user_data() {
+        let path = Path::new("/Users/test/Library/Application Support/Example/Documents");
+        assert_eq!(
+            classify_storage_path(path, true).safety,
+            StorageSafety::UserData
+        );
+        assert!(!app_cleanup_allowed(path));
+    }
+
+    #[test]
+    fn cleanup_classification_fixture_matrix() {
+        let fixtures = [
+            ("/Users/test/Library/Caches/App/data", StorageSafety::Safe),
+            ("/Users/test/Library/Logs/App.log", StorageSafety::Safe),
+            ("/Users/test/.cargo/registry/cache/pkg", StorageSafety::Safe),
+            ("/Users/test/.cargo/registry/src/pkg", StorageSafety::Safe),
+            ("/Users/test/project/node_modules/pkg", StorageSafety::Safe),
+            (
+                "/Users/test/Library/Developer/Xcode/DerivedData/App",
+                StorageSafety::Safe,
+            ),
+            (
+                "/Users/test/Library/Containers/com.docker.docker/Data",
+                StorageSafety::Review,
+            ),
+            (
+                "/Users/test/Library/Application Support/MobileSync/Backup/device",
+                StorageSafety::Review,
+            ),
+            ("/Users/test/project/.venv", StorageSafety::Review),
+            ("/Users/test/Downloads/installer.dmg", StorageSafety::Review),
+            (
+                "/Users/test/Library/Application Support/Example/Documents",
+                StorageSafety::UserData,
+            ),
+            ("/System/Library/CoreServices", StorageSafety::Protected),
+        ];
+
+        for (raw_path, expected) in fixtures {
+            let path = Path::new(raw_path);
+            assert_eq!(
+                classify_storage_path(path, true).safety,
+                expected,
+                "unexpected classification for {raw_path}"
+            );
+        }
+    }
+
+    #[test]
+    fn similarly_named_folders_do_not_inherit_cleanup_eligibility() {
+        for raw_path in [
+            "/Users/test/Documents/Caches/important",
+            "/Users/test/project/.cargo/config.toml",
+            "/Users/test/project/.vscode/settings.json",
+            "/Users/test/Library/Application Support/stremio-server/stremio-cache-backup",
+        ] {
+            assert!(
+                !matches!(
+                    classify_storage_path(Path::new(raw_path), true).safety,
+                    StorageSafety::Safe
+                ),
+                "{raw_path} must not be automatically eligible for cleanup"
+            );
+        }
     }
 }

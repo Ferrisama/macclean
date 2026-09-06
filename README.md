@@ -27,6 +27,7 @@ macclean system-data   # explain why System Data/storage is large
 macclean system-data --json
 macclean system-data --path ~/Library --depth 2 --limit 8 --deep
 macclean scan ~/Library --json --depth 1
+macclean app-scan ~ --depth 2 --limit 20 --no-health
 macclean history       # cleanup sessions, receipt paths, restore availability
 macclean restore       # restore the latest Trash-backed cleanup session
 macclean projects --path ~/code --only node --older-than-days 30
@@ -57,7 +58,18 @@ Running `macclean` with no arguments opens a full-screen dashboard with five tab
 
 Analyzing, scanning, and building an uninstall plan all run in the background, so switching tabs or typing is never blocked waiting on a scan to finish.
 
-`macclean` shows each cleanup item's type, risk, and reason before removal. User-data-adjacent cleanups such as app leftovers, project artifacts, installers, iOS backups, duplicate fonts, Xcode data, and ZSH completion files move items to the macOS Trash and are recorded in cleanup history with JSON receipts under `~/Library/Application Support/macclean/receipts/`. Cache/log cleaners delete immediately and permanently where moving cache contents to Trash would not free space until Trash is emptied.
+`macclean` shows each cleanup item's type, risk, and reason before removal. User-data-adjacent cleanups such as app leftovers, project artifacts, installers, iOS backups, duplicate fonts, Xcode data, and ZSH completion files move items to the macOS Trash and are recorded in cleanup history with JSON receipts under `~/Library/Application Support/macclean/receipts/`. On macOS, every new Trash-backed record stores the exact destination returned by Foundation, so Restore never guesses by filename and refuses collisions. Cache/log cleaners delete immediately and permanently where moving cache contents to Trash would not free space until Trash is emptied.
+
+## Native macOS app
+
+The repository also includes a SwiftUI desktop app with Fast and Deep scans, streamed Map results, cleanup review, History, Full Disk Access guidance, and read-only uninstall plans. Build a self-contained bundle with:
+
+```bash
+./scripts/build-swiftui-app.sh
+open dist/MacClean.app
+```
+
+Fast Scan sizes the selected folder's immediate children for a useful overview. Deep Scan explicitly traverses the requested depth. Both report incomplete coverage instead of presenting partial totals as complete.
 
 ---
 
@@ -101,6 +113,7 @@ Analyzing, scanning, and building an uninstall plan all run in the background, s
 | `macclean health` | CPU, memory, disk, battery, security at a glance |
 | `macclean doctor` | Permission/tool readiness checks for Full Disk Access, Trash, Homebrew, Docker, Xcode, Time Machine, and signing |
 | `macclean scan <path>` | Chart-ready folder tree scan (`--json`, `--depth`, `--limit`, `--deep`) |
+| `macclean app-scan <path>` | GUI-ready JSON contract with folder tree, largest items, safety totals, cleanup candidates, System Data, and optional health snapshot |
 | `macclean largest` | Biggest files on disk (`--min-mb 500`) |
 | `macclean dupes` | Duplicate files by content hash (`--min 10`) |
 | `macclean system-data` | Categorized System Data estimate and storage tree (`--json`, `--path`, `--depth`, `--limit`, `--deep`) |
@@ -150,7 +163,7 @@ macclean -n plan apply downloads
 macclean profile create-project dev-safe --path ~/code --only node,python --exclude ~/code/client --older-than-days 30
 ```
 
-Storage scans run in fast mode by default with a short time budget and may mark results as `partial`. Add `--deep` for exact slower scans. Latest chart-ready scan JSON is cached under `~/Library/Application Support/macclean/scans/`.
+Storage scans run in fast mode by default as a top-level overview and may mark results as `partial`. Add `--deep` for a slower, depth-aware traversal. Latest chart-ready scan JSON is cached under `~/Library/Application Support/macclean/scans/`.
 
 ---
 

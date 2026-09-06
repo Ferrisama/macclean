@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use serde::Serialize;
+use std::io::Write;
 
 use crate::cleaners;
 use crate::ui;
@@ -101,6 +103,49 @@ pub enum Commands {
         json: bool,
         #[arg(long)]
         deep: bool,
+    },
+    #[command(name = "app-scan")]
+    AppScan {
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
+        #[arg(long, default_value_t = 2usize)]
+        depth: usize,
+        #[arg(long, default_value_t = 20usize)]
+        limit: usize,
+        #[arg(long)]
+        deep: bool,
+        #[arg(long = "no-system-data")]
+        no_system_data: bool,
+        #[arg(long = "no-health")]
+        no_health: bool,
+        #[arg(long, hide = true)]
+        progress: bool,
+    },
+    #[command(name = "app-cache")]
+    AppCache,
+    #[command(name = "app-recipes")]
+    AppRecipes,
+    #[command(name = "app-uninstall-list")]
+    AppUninstallList,
+    #[command(name = "app-uninstall-plan")]
+    AppUninstallPlan {
+        path: std::path::PathBuf,
+        #[arg(long)]
+        deep: bool,
+    },
+    #[command(name = "app-history")]
+    AppHistory {
+        #[arg(long, default_value_t = 30usize)]
+        limit: usize,
+    },
+    #[command(name = "app-restore")]
+    AppRestore {
+        session: Option<String>,
+    },
+    #[command(name = "app-trash")]
+    AppTrash {
+        #[arg(required = true)]
+        paths: Vec<std::path::PathBuf>,
     },
     Largest {
         #[arg(long, default_value_t = 100u64)]
@@ -327,6 +372,30 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
             json,
             deep,
         } => run_storage_scan(path, depth, limit, json, deep),
+        Commands::AppScan {
+            path,
+            depth,
+            limit,
+            deep,
+            no_system_data,
+            no_health,
+            progress,
+        } => run_app_scan(
+            path,
+            depth,
+            limit,
+            deep,
+            !no_system_data,
+            !no_health,
+            progress,
+        ),
+        Commands::AppCache => run_app_cache(),
+        Commands::AppRecipes => run_app_recipes(),
+        Commands::AppUninstallList => run_app_uninstall_list(),
+        Commands::AppUninstallPlan { path, deep } => run_app_uninstall_plan(path, deep),
+        Commands::AppHistory { limit } => run_app_history(limit),
+        Commands::AppRestore { session } => run_app_restore(session),
+        Commands::AppTrash { paths } => run_app_trash(paths, dry_run),
         Commands::Largest {
             min_mb,
             limit,
@@ -386,6 +455,46 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
         } => cleaners::update::run(!no_brew, !no_pip, !no_npm),
         Commands::QuitApps { configure } => cleaners::quit_apps::run(configure, dry_run, yes),
     }
+}
+
+#[derive(Serialize)]
+struct AppTrashItemOutcome {
+    path: std::path::PathBuf,
+    moved: bool,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AppTrashResponse {
+    dry_run: bool,
+    moved_count: usize,
+    failed_count: usize,
+    total_bytes: u64,
+    outcomes: Vec<AppTrashItemOutcome>,
+}
+
+#[derive(Serialize)]
+struct AppRestoreItemOutcome {
+    session_id: String,
+    label: String,
+    path: std::path::PathBuf,
+    restored: bool,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AppRestoreResponse {
+    restored_count: usize,
+    failed_count: usize,
+    outcomes: Vec<AppRestoreItemOutcome>,
+}
+
+#[derive(Serialize)]
+struct AppInstalledApplication {
+    name: String,
+    path: std::path::PathBuf,
+    bundle_id: Option<String>,
+    protected: bool,
 }
 
 fn dispatch_plan(command: PlanCommand, dry_run: bool, yes: bool) -> Result<()> {
@@ -544,6 +653,218 @@ fn run_storage_scan(
     } else {
         cleaners::system_data::run(Some(path), depth, limit, scan_mode(deep), false)?;
     }
+    Ok(())
+}
+
+fn run_app_scan(
+    path: std::path::PathBuf,
+    depth: usize,
+    limit: usize,
+    deep: bool,
+    include_system_data: bool,
+    include_health: bool,
+    emit_progress: bool,
+) -> Result<()> {
+    let options = crate::core::app_scan::AppScanOptions {
+        root: path,
+        depth,
+        limit,
+        mode: scan_mode(deep),
+        include_system_data,
+        include_health,
+    };
+    let scan = if emit_progress {
+        let stdout = std::sync::Mutex::new(std::io::stdout());
+        crate::core::app_scan::scan_with_progress(options, |event| {
+            if let Ok(mut out) = stdout.lock() {
+                let _ = serde_json::to_writer(
+                    &mut *out,
+                    &serde_json::json!({"type":"progress", "data": event}),
+                );
+                let _ = writeln!(out);
+                let _ = out.flush();
+            }
+        })?
+    } else {
+        crate::core::app_scan::scan(options)?
+    };
+    if emit_progress {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"type":"result", "data": scan}))?
+        );
+    } else {
+        println!("{}", serde_json::to_string_pretty(&scan)?);
+    }
+    Ok(())
+}
+
+fn run_app_cache() -> Result<()> {
+    if let Some(scan) = crate::core::app_scan::read_app_scan_cache()? {
+        println!("{}", serde_json::to_string_pretty(&scan)?);
+    } else {
+        println!("null");
+    }
+    Ok(())
+}
+
+fn run_app_recipes() -> Result<()> {
+    let recipes = crate::core::app_scan::recipes();
+    println!("{}", serde_json::to_string_pretty(&recipes)?);
+    Ok(())
+}
+
+fn run_app_uninstall_list() -> Result<()> {
+    let apps: Vec<_> = crate::cleaners::uninstall::list_installed_apps()
+        .into_iter()
+        .map(|(name, path)| AppInstalledApplication {
+            bundle_id: crate::core::plist::read_bundle_id(&path),
+            protected: crate::cleaners::uninstall::is_protected_app(&path),
+            name,
+            path,
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&apps)?);
+    Ok(())
+}
+
+fn run_app_uninstall_plan(path: std::path::PathBuf, deep: bool) -> Result<()> {
+    let plan = crate::cleaners::uninstall::build_plan_with_options(
+        crate::cleaners::uninstall::UninstallOptions {
+            app_name: None,
+            app_path: Some(path),
+            bundle_id: None,
+            deep,
+        },
+    )?;
+    println!("{}", serde_json::to_string_pretty(&plan)?);
+    Ok(())
+}
+
+fn run_app_history(limit: usize) -> Result<()> {
+    let mut summaries = crate::core::history::session_summaries()?;
+    summaries.truncate(limit);
+    println!("{}", serde_json::to_string_pretty(&summaries)?);
+    Ok(())
+}
+
+fn run_app_restore(session: Option<String>) -> Result<()> {
+    let outcomes = crate::core::history::restore_session_detailed(session.as_deref())?;
+    let response_outcomes: Vec<_> = outcomes
+        .into_iter()
+        .map(|outcome| AppRestoreItemOutcome {
+            session_id: outcome.record.session_id,
+            label: outcome.record.label,
+            path: outcome.record.original_path,
+            restored: outcome.restored,
+            error: outcome.error,
+        })
+        .collect();
+    let restored_count = response_outcomes
+        .iter()
+        .filter(|outcome| outcome.restored)
+        .count();
+    let failed_count = response_outcomes.len().saturating_sub(restored_count);
+    let response = AppRestoreResponse {
+        restored_count,
+        failed_count,
+        outcomes: response_outcomes,
+    };
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
+    let mut items = Vec::new();
+    for path in paths {
+        if !path.exists() {
+            items.push(crate::core::CleanItem {
+                label: path.display().to_string(),
+                path,
+                size_bytes: 0,
+                removable: false,
+                kind: crate::core::CleanKind::Unknown,
+                risk: crate::core::RiskLevel::High,
+                reason: "Path does not exist.".into(),
+            });
+            continue;
+        }
+        let resolved_path = crate::core::safety::resolve_existing_path(&path)
+            .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
+        crate::core::safety::validate_removal(&resolved_path)
+            .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
+        if !crate::core::storage::app_cleanup_allowed(&resolved_path) {
+            anyhow::bail!(
+                "Refusing app cleanup for unclassified or protected path: {}",
+                resolved_path.display()
+            );
+        }
+        let size_bytes = if resolved_path.is_dir() {
+            crate::core::fs::dir_size(&resolved_path)
+        } else {
+            resolved_path.metadata().map(|m| m.len()).unwrap_or(0)
+        };
+        items.push(crate::core::CleanItem {
+            label: resolved_path.display().to_string(),
+            path: resolved_path,
+            size_bytes,
+            removable: true,
+            kind: crate::core::CleanKind::Unknown,
+            risk: crate::core::RiskLevel::High,
+            reason: "Selected in MacCleanApp review.".into(),
+        });
+    }
+
+    let total_bytes = items
+        .iter()
+        .filter(|item| item.removable)
+        .map(|item| item.size_bytes)
+        .sum();
+    let outcomes = if dry_run {
+        items
+            .iter()
+            .filter(|item| item.removable)
+            .map(|item| (item.path.clone(), Ok(())))
+            .collect()
+    } else {
+        crate::core::trash::trash_clean_items("app-review", &items)
+    };
+    let response_outcomes: Vec<_> = outcomes
+        .into_iter()
+        .map(|(path, result)| match result {
+            Ok(()) => AppTrashItemOutcome {
+                path,
+                moved: !dry_run,
+                error: None,
+            },
+            Err(error) => AppTrashItemOutcome {
+                path,
+                moved: false,
+                error: Some(error),
+            },
+        })
+        .collect();
+    let moved_count = if dry_run {
+        0
+    } else {
+        response_outcomes
+            .iter()
+            .filter(|outcome| outcome.moved)
+            .count()
+    };
+    let failed_count = if dry_run {
+        0
+    } else {
+        response_outcomes.len().saturating_sub(moved_count)
+    };
+    let response = AppTrashResponse {
+        dry_run,
+        moved_count,
+        failed_count,
+        total_bytes,
+        outcomes: response_outcomes,
+    };
+    println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
 

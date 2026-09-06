@@ -857,6 +857,7 @@ dependencies = [
  "indicatif",
  "inquire",
  "libc",
+ "objc2-foundation",
  "plist",
  "predicates",
  "ratatui",

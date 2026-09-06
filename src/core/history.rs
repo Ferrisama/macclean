@@ -3,20 +3,24 @@ use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone)]
+static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Serialize)]
 pub struct HistoryRecord {
     pub session_id: String,
     pub timestamp: u64,
     pub cleaner: String,
     pub label: String,
     pub original_path: PathBuf,
+    pub trash_path: Option<PathBuf>,
     pub size_bytes: u64,
     pub method: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum RestoreState {
     Available,
     OriginalExists,
@@ -35,7 +39,7 @@ impl RestoreState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SessionSummary {
     pub session_id: String,
     pub timestamp: u64,
@@ -62,6 +66,7 @@ pub struct ReceiptItem {
     pub status: String,
     pub restore: String,
     pub error: Option<String>,
+    pub trash_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +85,7 @@ impl HistoryRecord {
         cleaner: impl Into<String>,
         label: impl Into<String>,
         original_path: PathBuf,
+        trash_path: Option<PathBuf>,
         size_bytes: u64,
         method: impl Into<String>,
     ) -> Self {
@@ -89,6 +95,7 @@ impl HistoryRecord {
             cleaner: cleaner.into(),
             label: label.into(),
             original_path,
+            trash_path,
             size_bytes,
             method: method.into(),
         }
@@ -101,7 +108,10 @@ impl HistoryRecord {
         if self.original_path.exists() {
             return RestoreState::OriginalExists;
         }
-        if trash_candidate_path(&self.original_path).is_some_and(|path| path.exists()) {
+        let Some(trash_path) = self.trash_path.as_ref() else {
+            return RestoreState::NotTrashBacked;
+        };
+        if trash_path.exists() {
             RestoreState::Available
         } else {
             RestoreState::TrashItemMissing
@@ -110,7 +120,12 @@ impl HistoryRecord {
 }
 
 pub fn new_session_id(cleaner: &str) -> String {
-    format!("{}-{}", cleaner, now_secs())
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let sequence = SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{:x}-{:x}", cleaner, nanos, sequence)
 }
 
 pub fn append(record: &HistoryRecord) -> Result<()> {
@@ -122,12 +137,19 @@ pub fn append(record: &HistoryRecord) -> Result<()> {
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(
         file,
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         record.timestamp,
         escape(&record.session_id),
         escape(&record.cleaner),
         escape(&record.label),
         escape(&record.original_path.display().to_string()),
+        escape(
+            &record
+                .trash_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+        ),
         record.size_bytes,
         escape(&record.method)
     )?;
@@ -255,14 +277,10 @@ fn restore_record(record: &HistoryRecord) -> Result<()> {
         );
     }
 
-    if record.original_path.file_name().is_none() {
+    let Some(trashed) = record.trash_path.as_ref() else {
         bail!(
-            "Original path has no file name: {}",
-            record.original_path.display()
+            "This cleanup record has no verified Trash destination and cannot be restored automatically."
         );
-    };
-    let Some(trashed) = trash_candidate_path(&record.original_path) else {
-        bail!("Could not find home Trash directory.");
     };
     if !trashed.exists() {
         bail!("Trash item not found: {}", trashed.display());
@@ -272,12 +290,6 @@ fn restore_record(record: &HistoryRecord) -> Result<()> {
     }
     fs::rename(trashed, &record.original_path)?;
     Ok(())
-}
-
-fn trash_candidate_path(original_path: &Path) -> Option<PathBuf> {
-    let name = original_path.file_name()?;
-    let home = dirs::home_dir()?;
-    Some(home.join(".Trash").join(name))
 }
 
 fn history_path() -> Result<PathBuf> {
@@ -305,7 +317,7 @@ fn now_secs() -> u64 {
 
 fn parse_line(line: &str) -> Option<HistoryRecord> {
     let parts: Vec<_> = line.split('\t').collect();
-    if parts.len() != 7 {
+    if parts.len() != 7 && parts.len() != 8 {
         return None;
     }
     Some(HistoryRecord {
@@ -314,8 +326,10 @@ fn parse_line(line: &str) -> Option<HistoryRecord> {
         cleaner: unescape(parts[2]),
         label: unescape(parts[3]),
         original_path: Path::new(&unescape(parts[4])).to_path_buf(),
-        size_bytes: parts[5].parse().ok()?,
-        method: unescape(parts[6]),
+        trash_path: (parts.len() == 8 && !parts[5].is_empty())
+            .then(|| PathBuf::from(unescape(parts[5]))),
+        size_bytes: parts[if parts.len() == 8 { 6 } else { 5 }].parse().ok()?,
+        method: unescape(parts[if parts.len() == 8 { 7 } else { 6 }]),
     })
 }
 
@@ -356,5 +370,27 @@ mod tests {
     fn escapes_round_trip() {
         let value = "a\tb\nc\\d";
         assert_eq!(unescape(&escape(value)), value);
+    }
+
+    #[test]
+    fn session_ids_are_unique_within_the_same_second() {
+        let first = new_session_id("app-review");
+        let second = new_session_id("app-review");
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn history_with_a_recorded_trash_path_round_trips() {
+        let line = "1\tsession\tcleaner\tlabel\t/original\t/.Trash/item\t42\ttrash";
+        let record = parse_line(line).unwrap();
+        assert_eq!(record.trash_path, Some(PathBuf::from("/.Trash/item")));
+        assert_eq!(record.size_bytes, 42);
+    }
+
+    #[test]
+    fn legacy_history_is_not_promised_as_restorable() {
+        let record = parse_line("1\tsession\tcleaner\tlabel\t/original\t42\ttrash").unwrap();
+        assert_eq!(record.trash_path, None);
+        assert_eq!(record.restore_state(), RestoreState::NotTrashBacked);
     }
 }

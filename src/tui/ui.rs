@@ -272,7 +272,7 @@ fn draw_system_data_categories(frame: &mut Frame, categories: &[StorageCategory]
             width: inner.width,
             height: 1,
         };
-        let name_width = (inner.width as usize).saturating_sub(34).max(10);
+        let name_width = (inner.width as usize).saturating_sub(44).max(10);
         let line = Line::from(vec![
             Span::styled(
                 format!(
@@ -284,6 +284,10 @@ fn draw_system_data_categories(frame: &mut Frame, categories: &[StorageCategory]
             ),
             Span::raw(format!(" {:>9}", format_size(category.size_bytes))),
             Span::raw(format!(" {:>5.1}% ", category.percent_of_total)),
+            Span::styled(
+                format!("{:<9} ", truncate(category.safety.label(), 9)),
+                Style::new().fg(safety_color(category.safety)),
+            ),
             Span::styled(
                 percent_bar(category.percent_of_total, 12),
                 Style::new().fg(category_color(i)),
@@ -304,9 +308,13 @@ fn draw_system_data_actions(frame: &mut Frame, categories: &[StorageCategory], a
                     format!("{:<18}", truncate(&category.name, 18)),
                     Style::new().fg(Color::Cyan),
                 ),
+                Span::styled(
+                    format!("{:<9}", truncate(category.safety.label(), 9)),
+                    Style::new().fg(safety_color(category.safety)),
+                ),
                 Span::raw(truncate(
                     &category.clean_with,
-                    area.width.saturating_sub(20) as usize,
+                    area.width.saturating_sub(29) as usize,
                 )),
             ])
         })
@@ -362,6 +370,16 @@ fn category_color(index: usize) -> Color {
         5 => Color::LightRed,
         6 => Color::LightGreen,
         _ => Color::LightCyan,
+    }
+}
+
+fn safety_color(safety: crate::core::storage::StorageSafety) -> Color {
+    match safety {
+        crate::core::storage::StorageSafety::Safe => Color::Green,
+        crate::core::storage::StorageSafety::Review => Color::Yellow,
+        crate::core::storage::StorageSafety::UserData => Color::LightRed,
+        crate::core::storage::StorageSafety::Protected => Color::Red,
+        crate::core::storage::StorageSafety::Unknown => Color::DarkGray,
     }
 }
 

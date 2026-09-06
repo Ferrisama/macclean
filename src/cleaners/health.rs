@@ -4,7 +4,9 @@ use crate::ui::format_size;
 use anyhow::Result;
 use colored::Colorize;
 use comfy_table::{presets::UTF8_BORDERS_ONLY, Table};
+use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthSnapshot {
     pub disk_total: u64,
     pub disk_used: u64,
@@ -43,7 +45,10 @@ fn sip_status() -> bool {
 /// status and the biggest known space users in the home directory.
 pub fn snapshot() -> HealthSnapshot {
     // ── Disk ──────────────────────────────────────────────────────────────────
-    let df_r = run_cmd(&["df", "-k", "/"]);
+    let home_path = dirs::home_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    let df_r = run_cmd(&["df", "-k", &home_path]);
     let (disk_total, disk_used, disk_free) = {
         let mut t = (0u64, 0u64, 0u64);
         for line in df_r.output.lines().skip(1) {

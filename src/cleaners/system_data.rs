@@ -53,6 +53,7 @@ fn print_system_data_estimate(scan: &storage::SystemDataScan) {
         "Category",
         "Size",
         "Share",
+        "Safety",
         "Map",
         "Why It Counts",
         "Action",
@@ -67,6 +68,7 @@ fn print_system_data_estimate(scan: &storage::SystemDataScan) {
             category.name.clone(),
             format_size(category.size_bytes),
             format!("{:.1}%", category.percent_of_total),
+            category.safety.label().to_string(),
             bar(category.size_bytes, max, 18),
             category.why.clone(),
             category.clean_with.clone(),
@@ -144,10 +146,11 @@ fn root_label(entry: &StorageNode) -> String {
 fn entry_label(entry: &StorageNode) -> String {
     let partial = if entry.partial { " partial" } else { "" };
     format!(
-        "{}  {}  {:>5.1}%  {}{}",
+        "{}  {}  {:>5.1}%  {:<9}  {}{}",
         entry.name,
         format_size(entry.size_bytes),
         entry.percent_of_parent,
+        entry.safety.label(),
         percent_bar(entry.percent_of_parent, 12),
         partial.yellow()
     )
