@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use serde::Serialize;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -130,11 +130,31 @@ pub fn new_session_id(cleaner: &str) -> String {
 
 pub fn append(record: &HistoryRecord) -> Result<()> {
     let path = history_path()?;
+    append_to_path(&path, record)
+}
+
+fn append_to_path(path: &Path, record: &HistoryRecord) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)?;
+    let length = file.metadata()?.len();
+    if length > 0 {
+        file.seek(SeekFrom::End(-1))?;
+        let mut last = [0_u8; 1];
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            // A killed writer may leave an incomplete final record. Start the
+            // next valid record on a fresh line so recovery can ignore only
+            // the damaged line instead of losing all later history.
+            file.write_all(b"\n")?;
+        }
+    }
     writeln!(
         file,
         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -153,6 +173,7 @@ pub fn append(record: &HistoryRecord) -> Result<()> {
         record.size_bytes,
         escape(&record.method)
     )?;
+    file.sync_data()?;
     Ok(())
 }
 
@@ -174,8 +195,40 @@ pub fn write_receipt(
         method: method.into(),
         items,
     };
-    fs::write(&path, serde_json::to_string_pretty(&receipt)?)?;
+    atomic_write(&path, serde_json::to_string_pretty(&receipt)?.as_bytes())?;
     Ok(path)
+}
+
+fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Output path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("macclean-record");
+    let sequence = SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        file_name,
+        std::process::id(),
+        sequence
+    ));
+
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 pub fn read_all() -> Result<Vec<HistoryRecord>> {
@@ -251,6 +304,10 @@ pub fn restore_session_detailed(session_id: Option<&str>) -> Result<Vec<RestoreO
         );
     }
 
+    Ok(restore_records(records))
+}
+
+fn restore_records(records: Vec<HistoryRecord>) -> Vec<RestoreOutcome> {
     let mut outcomes = Vec::new();
     for record in records {
         match restore_record(&record) {
@@ -266,7 +323,7 @@ pub fn restore_session_detailed(session_id: Option<&str>) -> Result<Vec<RestoreO
             }),
         }
     }
-    Ok(outcomes)
+    outcomes
 }
 
 fn restore_record(record: &HistoryRecord) -> Result<()> {
@@ -293,18 +350,12 @@ fn restore_record(record: &HistoryRecord) -> Result<()> {
 }
 
 fn history_path() -> Result<PathBuf> {
-    let Some(home) = dirs::home_dir() else {
-        bail!("Could not find home directory.");
-    };
-    Ok(home.join("Library/Application Support/macclean/history.tsv"))
+    Ok(crate::core::state_dir()?.join("history.tsv"))
 }
 
 pub fn receipt_path(session_id: &str) -> Result<PathBuf> {
-    let Some(home) = dirs::home_dir() else {
-        bail!("Could not find home directory.");
-    };
-    Ok(home
-        .join("Library/Application Support/macclean/receipts")
+    Ok(crate::core::state_dir()?
+        .join("receipts")
         .join(format!("{}.json", session_id)))
 }
 
@@ -365,6 +416,19 @@ fn unescape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    fn test_record(original_path: PathBuf, trash_path: Option<PathBuf>) -> HistoryRecord {
+        HistoryRecord::new(
+            "session",
+            "test",
+            "item",
+            original_path,
+            trash_path,
+            4,
+            "trash",
+        )
+    }
 
     #[test]
     fn escapes_round_trip() {
@@ -388,9 +452,104 @@ mod tests {
     }
 
     #[test]
+    fn append_recovers_after_an_interrupted_final_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.tsv");
+        fs::write(&path, "1\ttruncated-without-newline").unwrap();
+        let record = test_record(
+            dir.path().join("original"),
+            Some(dir.path().join("trashed")),
+        );
+
+        append_to_path(&path, &record).unwrap();
+
+        let contents = fs::read_to_string(path).unwrap();
+        let parsed: Vec<_> = contents.lines().filter_map(parse_line).collect();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].session_id, "session");
+    }
+
+    #[test]
+    fn atomic_write_leaves_only_the_completed_destination() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("receipt.json");
+        atomic_write(&path, br#"{"status":"complete"}"#).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            r#"{"status":"complete"}"#
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
     fn legacy_history_is_not_promised_as_restorable() {
         let record = parse_line("1\tsession\tcleaner\tlabel\t/original\t42\ttrash").unwrap();
         assert_eq!(record.trash_path, None);
         assert_eq!(record.restore_state(), RestoreState::NotTrashBacked);
+    }
+
+    #[test]
+    fn restore_refuses_to_overwrite_an_existing_original() {
+        let dir = tempdir().unwrap();
+        let original = dir.path().join("original");
+        let trashed = dir.path().join("trashed");
+        fs::write(&original, "keep").unwrap();
+        fs::write(&trashed, "trash").unwrap();
+
+        let error = restore_record(&test_record(original.clone(), Some(trashed.clone())))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already exists"));
+        assert_eq!(fs::read_to_string(original).unwrap(), "keep");
+        assert!(trashed.exists());
+    }
+
+    #[test]
+    fn restore_uses_the_recorded_collision_destination() {
+        let dir = tempdir().unwrap();
+        let original = dir.path().join("item");
+        let collision_destination = dir.path().join("item 2");
+        fs::write(&collision_destination, "data").unwrap();
+
+        restore_record(&test_record(
+            original.clone(),
+            Some(collision_destination.clone()),
+        ))
+        .unwrap();
+        assert_eq!(fs::read_to_string(original).unwrap(), "data");
+        assert!(!collision_destination.exists());
+    }
+
+    #[test]
+    fn restore_reports_a_missing_trash_item() {
+        let dir = tempdir().unwrap();
+        let original = dir.path().join("original");
+        let missing = dir.path().join("missing-trash-item");
+        let error = restore_record(&test_record(original, Some(missing)))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Trash item not found"));
+    }
+
+    #[test]
+    fn partial_restore_reports_each_item_independently() {
+        let dir = tempdir().unwrap();
+        let restored_original = dir.path().join("restored");
+        let restored_trash = dir.path().join("restored-trash");
+        fs::write(&restored_trash, "ok").unwrap();
+        let occupied_original = dir.path().join("occupied");
+        let occupied_trash = dir.path().join("occupied-trash");
+        fs::write(&occupied_original, "keep").unwrap();
+        fs::write(&occupied_trash, "blocked").unwrap();
+
+        let outcomes = restore_records(vec![
+            test_record(restored_original.clone(), Some(restored_trash)),
+            test_record(occupied_original, Some(occupied_trash.clone())),
+        ]);
+        assert!(outcomes[0].restored);
+        assert!(!outcomes[1].restored);
+        assert!(restored_original.exists());
+        assert!(occupied_trash.exists());
     }
 }

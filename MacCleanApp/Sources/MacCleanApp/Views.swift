@@ -573,7 +573,18 @@ struct UninstallPlanPreview: View {
                     .foregroundStyle(.orange)
             }
 
-            if !plan.canExecute {
+            if let preflightError = plan.preflightError {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Unable to verify that uninstall is safe", systemImage: "questionmark.diamond.fill")
+                        .font(.headline)
+                        .foregroundStyle(.red)
+                    Text(preflightError)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(10)
+                .background(.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+            } else if !plan.canExecute {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("Quit \(plan.appName) before uninstalling", systemImage: "exclamationmark.octagon.fill")
                         .font(.headline)
@@ -1084,7 +1095,7 @@ struct CandidateList: View {
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: {
-                    Text("Selected items are recoverable from Trash and macclean history when the backend records the move.")
+                    Text("Selected items remain on disk in Trash and are recoverable through macclean History. Disk space is reclaimed only after Trash is emptied.")
                 }
             }
             if let message {

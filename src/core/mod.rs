@@ -12,6 +12,16 @@ pub mod trash;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub fn state_dir() -> anyhow::Result<PathBuf> {
+    if let Some(path) = std::env::var_os("MACCLEAN_STATE_DIR").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    let Some(home) = dirs::home_dir() else {
+        anyhow::bail!("Could not find home directory.");
+    };
+    Ok(home.join("Library/Application Support/macclean"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CleanKind {
     Cache,

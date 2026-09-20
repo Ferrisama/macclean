@@ -476,6 +476,8 @@ struct AppTrashResponse {
     moved_count: usize,
     failed_count: usize,
     total_bytes: u64,
+    moved_bytes: u64,
+    reclaimed_bytes: u64,
     outcomes: Vec<AppTrashItemOutcome>,
 }
 
@@ -839,6 +841,41 @@ fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
         });
     }
 
+    // A parent and one of its descendants must never be submitted as two
+    // independent moves. Moving the parent makes the child disappear and
+    // produces a misleading partial failure in the review UI.
+    items.sort_by(|a, b| {
+        a.path
+            .components()
+            .count()
+            .cmp(&b.path.components().count())
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    let mut non_overlapping = Vec::new();
+    for item in items {
+        if non_overlapping
+            .iter()
+            .any(|parent: &crate::core::CleanItem| {
+                item.path != parent.path && item.path.starts_with(&parent.path)
+            })
+        {
+            response_outcomes.push(AppTrashItemOutcome {
+                path: item.path,
+                moved: false,
+                trash_path: None,
+                error: Some(
+                    "Already covered by a selected parent folder; deselect this item.".into(),
+                ),
+            });
+        } else if non_overlapping
+            .iter()
+            .all(|existing: &crate::core::CleanItem| existing.path != item.path)
+        {
+            non_overlapping.push(item);
+        }
+    }
+    let items = non_overlapping;
+
     let total_bytes = items
         .iter()
         .filter(|item| item.removable)
@@ -885,6 +922,15 @@ fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
         .iter()
         .filter(|outcome| outcome.error.is_some())
         .count();
+    let moved_bytes = items
+        .iter()
+        .filter(|item| {
+            response_outcomes
+                .iter()
+                .any(|outcome| outcome.path == item.path && outcome.moved)
+        })
+        .map(|item| item.size_bytes)
+        .sum();
     let response = AppTrashResponse {
         dry_run,
         session_id,
@@ -892,6 +938,10 @@ fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
         moved_count,
         failed_count,
         total_bytes,
+        moved_bytes,
+        // Moving an item to Trash preserves it on the same volume. Reclaim is
+        // zero until the user empties Trash or macOS purges it.
+        reclaimed_bytes: 0,
         outcomes: response_outcomes,
     };
     println!("{}", serde_json::to_string_pretty(&response)?);

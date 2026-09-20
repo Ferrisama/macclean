@@ -1,5 +1,6 @@
 use crate::core::cmd::run_cmd;
 use crate::core::fs::dir_size;
+use crate::core::safety::{self, FileIdentity};
 use crate::core::{CleanItem, CleanKind, RiskLevel};
 use crate::ui::{confirm, format_size, print_err, print_ok, print_warn};
 use anyhow::{bail, Result};
@@ -14,6 +15,7 @@ pub struct TraceItem {
     pub size_bytes: u64,
     pub reason: String,
     pub risk: RiskLevel,
+    pub identity: FileIdentity,
 }
 
 /// The result of scanning for an app and everything associated with it,
@@ -29,6 +31,7 @@ pub struct UninstallPlan {
     pub deep: bool,
     pub running_processes: Vec<RunningProcess>,
     pub can_execute: bool,
+    pub preflight_error: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -243,13 +246,39 @@ pub fn build_plan_with_options(options: UninstallOptions) -> Result<UninstallPla
         }
     }
 
-    to_remove.sort_by_key(|(path, _, _)| path.display().to_string());
-    to_remove.dedup_by(|a, b| a.0 == b.0);
+    let mut canonical_targets = Vec::new();
+    for (path, reason, risk) in to_remove {
+        let identity = safety::capture_identity(&path)
+            .map_err(|error| anyhow::anyhow!("{}: {}", path.display(), error))?;
+        canonical_targets.push((identity.canonical_path.clone(), reason, risk, identity));
+    }
+    canonical_targets.sort_by(|a, b| {
+        a.0.components()
+            .count()
+            .cmp(&b.0.components().count())
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let mut deduplicated = Vec::new();
+    for candidate in canonical_targets {
+        if deduplicated.iter().any(
+            |(parent, _, _, _): &(PathBuf, String, RiskLevel, FileIdentity)| {
+                candidate.0 != *parent && candidate.0.starts_with(parent)
+            },
+        ) {
+            continue;
+        }
+        if !deduplicated
+            .iter()
+            .any(|(path, _, _, _)| *path == candidate.0)
+        {
+            deduplicated.push(candidate);
+        }
+    }
 
     let mut total_size = 0u64;
-    let items: Vec<TraceItem> = to_remove
+    let items: Vec<TraceItem> = deduplicated
         .into_iter()
-        .map(|(path, reason, risk)| {
+        .map(|(path, reason, risk, identity)| {
             let size_bytes = if path.is_dir() {
                 dir_size(&path)
             } else {
@@ -261,12 +290,18 @@ pub fn build_plan_with_options(options: UninstallOptions) -> Result<UninstallPla
                 size_bytes,
                 reason,
                 risk,
+                identity,
             }
         })
         .collect();
 
-    let running_processes = find_running_processes(&app_path);
-    let can_execute = running_processes.is_empty();
+    let process_check = find_running_processes(&app_path);
+    let (running_processes, preflight_error) = match process_check {
+        ProcessCheck::Stopped => (Vec::new(), None),
+        ProcessCheck::Running(processes) => (processes, None),
+        ProcessCheck::Unknown(error) => (Vec::new(), Some(error)),
+    };
+    let can_execute = running_processes.is_empty() && preflight_error.is_none();
 
     Ok(UninstallPlan {
         app_name,
@@ -278,6 +313,7 @@ pub fn build_plan_with_options(options: UninstallOptions) -> Result<UninstallPla
         deep,
         running_processes,
         can_execute,
+        preflight_error,
     })
 }
 
@@ -373,19 +409,38 @@ pub fn is_protected_app(app_path: &Path) -> bool {
 /// Move everything in the plan to the Trash (recoverable). Returns one
 /// result per item.
 pub fn execute(plan: &UninstallPlan) -> Vec<(PathBuf, std::result::Result<(), String>)> {
-    let items: Vec<CleanItem> = plan
-        .items
-        .iter()
-        .map(|item| CleanItem {
+    match find_running_processes(&plan.app_path) {
+        ProcessCheck::Running(processes) => {
+            return vec![(
+                plan.app_path.clone(),
+                Err(format!(
+                    "refusing uninstall while {} matching process(es) are running",
+                    processes.len()
+                )),
+            )];
+        }
+        ProcessCheck::Unknown(error) => {
+            return vec![(plan.app_path.clone(), Err(error))];
+        }
+        ProcessCheck::Stopped => {}
+    }
+
+    let mut items = Vec::new();
+    for item in &plan.items {
+        let path = match safety::validate_identity(&item.path, &item.identity) {
+            Ok(path) => path,
+            Err(error) => return vec![(item.path.clone(), Err(error))],
+        };
+        items.push(CleanItem {
             label: item.path.display().to_string(),
-            path: item.path.clone(),
+            path,
             size_bytes: item.size_bytes,
             removable: true,
             kind: CleanKind::AppTrace,
             risk: item.risk,
             reason: item.reason.clone(),
-        })
-        .collect();
+        });
+    }
     crate::core::trash::trash_clean_items("uninstall", &items)
 }
 
@@ -456,13 +511,30 @@ pub fn run_with_options(options: UninstallOptions, dry_run: bool, yes: bool) -> 
     Ok(())
 }
 
-fn find_running_processes(app_path: &Path) -> Vec<RunningProcess> {
-    let pattern = format!("{}/Contents/", app_path.display());
-    let result = run_cmd(&["pgrep", "-ifl", &pattern]);
+enum ProcessCheck {
+    Running(Vec<RunningProcess>),
+    Stopped,
+    Unknown(String),
+}
+
+fn find_running_processes(app_path: &Path) -> ProcessCheck {
+    let marker = format!("{}/Contents/", app_path.display());
+    let result = run_cmd(&["ps", "-axo", "pid=,command="]);
     if !result.success() {
-        return Vec::new();
+        return ProcessCheck::Unknown(format!(
+            "could not verify whether the app is running: {}",
+            result.output
+        ));
     }
-    parse_running_processes(&result.output)
+    let processes: Vec<_> = parse_running_processes(&result.output)
+        .into_iter()
+        .filter(|process| process.command.contains(&marker))
+        .collect();
+    if processes.is_empty() {
+        ProcessCheck::Stopped
+    } else {
+        ProcessCheck::Running(processes)
+    }
 }
 
 fn parse_running_processes(output: &str) -> Vec<RunningProcess> {

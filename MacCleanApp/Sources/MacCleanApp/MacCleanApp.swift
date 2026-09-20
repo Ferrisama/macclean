@@ -429,7 +429,7 @@ final class AppModel: ObservableObject {
                     .map { " \($0)" } ?? ""
                 let sessionDetail = response.sessionId.map { " Session: \($0)." } ?? ""
                 let receiptDetail = response.receiptError.map { " \($0)" } ?? ""
-                cleanupMessage = "Moved \(response.movedCount) item(s) to Trash, \(response.failedCount) failed. \(formatBytes(response.totalBytes)) reviewed.\(sessionDetail)\(failureDetail)\(receiptDetail)"
+                cleanupMessage = "Moved \(response.movedCount) item(s) (\(formatBytes(response.movedBytes))) to Trash; \(formatBytes(response.reclaimedBytes)) reclaimed until Trash is emptied. \(response.failedCount) failed.\(sessionDetail)\(failureDetail)\(receiptDetail)"
                 cleanupOutcomes = response.outcomes
                 selectedCleanupPaths.removeAll()
                 selectedRecipe = nil

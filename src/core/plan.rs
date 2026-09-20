@@ -15,6 +15,8 @@ pub struct PlanItem {
     pub kind: CleanKind,
     pub risk: RiskLevel,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<safety::FileIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,12 +55,16 @@ pub fn create_from_paths(name: &str, paths: &[PathBuf]) -> Result<StoredPlan> {
             // A plan may be applied from a different working directory than
             // the one in which it was created. Persisting the resolved path
             // makes its target stable in that case.
-            path: resolved_path,
+            path: resolved_path.clone(),
             size_bytes,
             is_dir,
             kind: CleanKind::Unknown,
             risk: RiskLevel::High,
             reason: "User-preselected path; review before applying.".into(),
+            identity: Some(
+                safety::capture_identity(&resolved_path)
+                    .map_err(|e| anyhow::anyhow!("{}: {}", resolved_path.display(), e))?,
+            ),
         });
     }
 
@@ -89,6 +95,10 @@ pub fn create_from_clean_items(
             kind: item.kind,
             risk: item.risk,
             reason: item.reason.clone(),
+            identity: Some(
+                safety::capture_identity(&resolved_path)
+                    .map_err(|e| anyhow::anyhow!("{}: {}", resolved_path.display(), e))?,
+            ),
         });
     }
 
@@ -195,6 +205,10 @@ pub fn validate_plan(plan: &StoredPlan) -> Result<()> {
                 item.path.display()
             );
         }
+        if let Some(identity) = &item.identity {
+            safety::validate_identity(&item.path, identity)
+                .map_err(|e| anyhow::anyhow!("{}: {}", item.path.display(), e))?;
+        }
         safety::validate_removal(&item.path)
             .map_err(|e| anyhow::anyhow!("{}: {}", item.path.display(), e))?;
     }
@@ -206,10 +220,7 @@ fn plan_path(name: &str) -> Result<PathBuf> {
 }
 
 fn plans_dir() -> Result<PathBuf> {
-    let Some(home) = dirs::home_dir() else {
-        bail!("Could not find home directory.");
-    };
-    Ok(home.join("Library/Application Support/macclean/plans"))
+    Ok(crate::core::state_dir()?.join("plans"))
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -256,8 +267,22 @@ mod tests {
                 kind: CleanKind::Unknown,
                 risk: RiskLevel::High,
                 reason: "test".into(),
+                identity: None,
             }],
         };
+        assert!(validate_plan(&plan).is_err());
+    }
+
+    #[test]
+    fn rejects_a_target_replaced_after_plan_creation() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cache-file");
+        fs::write(&path, "original").unwrap();
+        let plan = create_from_paths("identity-test", std::slice::from_ref(&path)).unwrap();
+
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, "replacement").unwrap();
+
         assert!(validate_plan(&plan).is_err());
     }
 

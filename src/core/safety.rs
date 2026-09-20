@@ -1,5 +1,47 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileIdentity {
+    pub canonical_path: PathBuf,
+    pub device: u64,
+    pub inode: u64,
+    pub is_dir: bool,
+    pub is_file: bool,
+}
+
+pub fn capture_identity(path: &Path) -> Result<FileIdentity, String> {
+    let canonical_path = resolve_existing_path(path)?;
+    let metadata = fs::symlink_metadata(&canonical_path)
+        .map_err(|error| format!("could not inspect {}: {}", canonical_path.display(), error))?;
+    Ok(FileIdentity {
+        canonical_path,
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(not(unix))]
+        device: 0,
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(not(unix))]
+        inode: 0,
+        is_dir: metadata.file_type().is_dir(),
+        is_file: metadata.file_type().is_file(),
+    })
+}
+
+pub fn validate_identity(path: &Path, expected: &FileIdentity) -> Result<PathBuf, String> {
+    let current = capture_identity(path)?;
+    if &current != expected {
+        return Err(format!(
+            "cleanup target changed after review: {}",
+            path.display()
+        ));
+    }
+    validate_removal(&current.canonical_path)?;
+    Ok(current.canonical_path)
+}
 
 const PROTECTED_NAMES: &[&str] = &[".git", ".ssh", ".gnupg"];
 
@@ -115,6 +157,7 @@ fn normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn rejects_root() {
@@ -130,5 +173,17 @@ mod tests {
     fn resolves_parent_components_before_validation() {
         let resolved = resolve_existing_path(Path::new("/tmp/../tmp")).unwrap();
         assert_eq!(resolved, PathBuf::from("/private/tmp"));
+    }
+
+    #[test]
+    fn identity_revalidation_rejects_a_replaced_target() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("target");
+        fs::write(&path, "original").unwrap();
+        let identity = capture_identity(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, "replacement").unwrap();
+
+        assert!(validate_identity(&path, &identity).is_err());
     }
 }

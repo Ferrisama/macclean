@@ -238,6 +238,8 @@ struct AppTrashResponse: Codable {
     let movedCount: Int
     let failedCount: Int
     let totalBytes: UInt64
+    let movedBytes: UInt64
+    let reclaimedBytes: UInt64
     let outcomes: [AppTrashOutcome]
 }
 
@@ -282,6 +284,7 @@ struct UninstallPlan: Codable {
     let deep: Bool
     let runningProcesses: [RunningApplicationProcess]
     let canExecute: Bool
+    let preflightError: String?
 }
 
 struct RunningApplicationProcess: Codable, Identifiable {
