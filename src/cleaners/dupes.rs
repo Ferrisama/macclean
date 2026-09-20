@@ -4,11 +4,135 @@ use anyhow::Result;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateFile {
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub modified_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateGroup {
+    pub id: String,
+    pub size_bytes: u64,
+    pub wasted_bytes: u64,
+    pub files: Vec<DuplicateFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateReport {
+    pub schema_version: u32,
+    pub root: PathBuf,
+    pub min_bytes: u64,
+    pub scanned_files: u64,
+    pub hashed_files: u64,
+    pub partial: bool,
+    pub error_count: u64,
+    pub total_wasted_bytes: u64,
+    pub groups: Vec<DuplicateGroup>,
+}
+
+pub fn analyze(root: &Path, min_bytes: u64) -> Result<DuplicateReport> {
+    let root = std::fs::canonicalize(root)?;
+    if !root.is_dir() {
+        anyhow::bail!("Duplicate scan root is not a directory: {}", root.display());
+    }
+
+    let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    let mut scanned_files = 0_u64;
+    let mut error_count = 0_u64;
+    for entry in WalkDir::new(&root).follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                error_count += 1;
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        scanned_files += 1;
+        match entry.metadata() {
+            Ok(metadata) if metadata.len() >= min_bytes => {
+                by_size
+                    .entry(metadata.len())
+                    .or_default()
+                    .push(entry.into_path());
+            }
+            Ok(_) => {}
+            Err(_) => error_count += 1,
+        }
+    }
+
+    let candidates: Vec<_> = by_size
+        .into_iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .collect();
+    let hashed: Vec<_> = candidates
+        .par_iter()
+        .flat_map_iter(|(size, paths)| {
+            paths
+                .iter()
+                .map(|path| (path.clone(), *size, hash_file(path)))
+        })
+        .collect();
+    let mut by_hash: HashMap<String, Vec<(PathBuf, u64)>> = HashMap::new();
+    let mut hashed_files = 0_u64;
+    for (path, size, hash) in hashed {
+        if let Some(hash) = hash {
+            hashed_files += 1;
+            by_hash.entry(hash).or_default().push((path, size));
+        } else {
+            error_count += 1;
+        }
+    }
+
+    let mut groups: Vec<DuplicateGroup> = by_hash
+        .into_iter()
+        .filter(|(_, files)| files.len() > 1)
+        .map(|(id, mut files)| {
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            let size_bytes = files[0].1;
+            DuplicateGroup {
+                id,
+                size_bytes,
+                wasted_bytes: size_bytes.saturating_mul(files.len().saturating_sub(1) as u64),
+                files: files
+                    .into_iter()
+                    .map(|(path, size_bytes)| DuplicateFile {
+                        modified_at: modified_secs(&path),
+                        path,
+                        size_bytes,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    groups.sort_by_key(|group| Reverse(group.wasted_bytes));
+    let total_wasted_bytes = groups.iter().fold(0_u64, |total, group| {
+        total.saturating_add(group.wasted_bytes)
+    });
+
+    Ok(DuplicateReport {
+        schema_version: 1,
+        root,
+        min_bytes,
+        scanned_files,
+        hashed_files,
+        partial: error_count > 0,
+        error_count,
+        total_wasted_bytes,
+        groups,
+    })
+}
 
 pub fn run(
     min_mb: u64,
@@ -31,76 +155,33 @@ pub fn run(
         .dimmed()
     );
 
-    // ── Step 1: Group files by size (cheap filter) ────────────────────────────
-    let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-
-    for entry in WalkDir::new(&root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-    {
-        if let Ok(meta) = entry.metadata() {
-            let size = meta.len();
-            if size >= min_bytes {
-                by_size.entry(size).or_default().push(entry.into_path());
-            }
-        }
-    }
-
-    // ── Step 2: Parallel hash of candidates ──────────────────────────────────
-    let candidates: Vec<(u64, Vec<PathBuf>)> = by_size
-        .into_iter()
-        .filter(|(_, paths)| paths.len() > 1)
-        .collect();
-
-    let total_files: usize = candidates.iter().map(|(_, p)| p.len()).sum();
-
-    if total_files == 0 {
-        println!("{}", "No duplicate files found.".green());
-        return Ok(());
-    }
-
-    let pb = ProgressBar::new(total_files as u64);
+    let pb = ProgressBar::new_spinner();
     pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} Hashing files...",
-        )
-        .unwrap()
-        .progress_chars("=>-"),
+        ProgressStyle::with_template("{spinner:.cyan} Scanning and hashing files...")
+            .unwrap()
+            .progress_chars("=>-"),
     );
 
-    let mut by_hash: HashMap<String, Vec<(PathBuf, u64)>> = HashMap::new();
-
-    for (size, paths) in &candidates {
-        let hashes: Vec<Option<String>> = paths.par_iter().map(|path| hash_file(path)).collect();
-
-        for (path, hash) in paths.iter().zip(hashes) {
-            pb.inc(1);
-            if let Some(h) = hash {
-                by_hash.entry(h).or_default().push((path.clone(), *size));
-            }
-        }
-    }
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    let report = analyze(&root, min_bytes)?;
     pb.finish_and_clear();
 
-    let dup_groups: Vec<Vec<(PathBuf, u64)>> = by_hash
-        .into_values()
-        .filter(|v| v.len() > 1)
-        .map(|mut group| {
-            group.sort_by_key(|(path, _)| path.display().to_string());
-            group
-        })
-        .collect();
-
-    if dup_groups.is_empty() {
+    if report.groups.is_empty() {
         println!("{}", "No duplicate files found.".green());
         return Ok(());
     }
 
-    // Sort groups by wasted space descending
-    let mut groups = dup_groups;
-    groups.sort_by_key(|g| Reverse(g[0].1 * (g.len() as u64 - 1)));
+    let groups: Vec<Vec<(PathBuf, u64)>> = report
+        .groups
+        .iter()
+        .map(|group| {
+            group
+                .files
+                .iter()
+                .map(|file| (file.path.clone(), file.size_bytes))
+                .collect()
+        })
+        .collect();
 
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
 
@@ -262,4 +343,38 @@ fn hash_file(path: &Path) -> Option<String> {
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher).ok()?;
     Some(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn analysis_groups_only_content_identical_files() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.bin"), b"same bytes").unwrap();
+        std::fs::write(dir.path().join("b.bin"), b"same bytes").unwrap();
+        std::fs::write(dir.path().join("c.bin"), b"different!").unwrap();
+
+        let report = analyze(dir.path(), 1).unwrap();
+
+        assert_eq!(report.scanned_files, 3);
+        assert_eq!(report.groups.len(), 1);
+        assert_eq!(report.groups[0].files.len(), 2);
+        assert_eq!(report.groups[0].wasted_bytes, 10);
+        assert!(!report.partial);
+    }
+
+    #[test]
+    fn analysis_respects_minimum_size() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.bin"), b"same").unwrap();
+        std::fs::write(dir.path().join("b.bin"), b"same").unwrap();
+
+        let report = analyze(dir.path(), 5).unwrap();
+
+        assert!(report.groups.is_empty());
+        assert_eq!(report.hashed_files, 0);
+    }
 }

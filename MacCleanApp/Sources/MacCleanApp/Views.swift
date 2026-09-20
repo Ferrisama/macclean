@@ -161,6 +161,116 @@ enum MapSort: String, CaseIterable, Identifiable {
     var title: String { rawValue.capitalized }
 }
 
+struct DuplicatesView: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Duplicate Files")
+                        .font(.title2.bold())
+                    Text("Read-only beta: files are grouped only after their SHA-256 contents match.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Stepper(
+                    "Minimum \(model.duplicateMinMB) MB",
+                    value: $model.duplicateMinMB,
+                    in: 1...1024,
+                    step: 1
+                )
+                .frame(width: 190)
+                if model.isScanningDuplicates {
+                    Button("Cancel", action: model.cancelDuplicateScan)
+                } else {
+                    Button {
+                        model.scanDuplicates()
+                    } label: {
+                        Label("Find Duplicates", systemImage: "doc.on.doc")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+
+            if model.isScanningDuplicates {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Scanning \(model.path) and hashing same-size candidates…")
+                        .foregroundStyle(.secondary)
+                }
+            } else if let error = model.duplicateError {
+                EmptyState(message: error)
+            } else if let report = model.duplicateReport {
+                HStack(spacing: 12) {
+                    MetricCard(
+                        title: "Recoverable copies",
+                        value: formatBytes(report.totalWastedBytes),
+                        subtitle: "\(report.groups.count) content-identical group(s)"
+                    )
+                    MetricCard(
+                        title: "Files examined",
+                        value: "\(report.scannedFiles)",
+                        subtitle: "\(report.hashedFiles) candidate file(s) hashed"
+                    )
+                }
+                .frame(maxHeight: 125)
+
+                if report.partial {
+                    PartialScanNotice(
+                        reason: "\(report.errorCount) path(s) could not be read; results may be incomplete."
+                    )
+                }
+
+                if report.groups.isEmpty {
+                    EmptyPanelText("No content-identical files at or above \(model.duplicateMinMB) MB.")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(report.groups) { group in
+                        Section {
+                            ForEach(group.files) { file in
+                                HStack(spacing: 10) {
+                                    Image(systemName: "doc")
+                                        .foregroundStyle(.secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(URL(fileURLWithPath: file.path).lastPathComponent)
+                                        Text(file.path)
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Text(formatBytes(file.sizeBytes))
+                                        .monospacedDigit()
+                                    Button {
+                                        revealInFinder(file.path)
+                                    } label: {
+                                        Image(systemName: "finder")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Reveal in Finder")
+                                }
+                            }
+                        } header: {
+                            HStack {
+                                Text("\(group.files.count) copies")
+                                Spacer()
+                                Text("\(formatBytes(group.wastedBytes)) recoverable")
+                            }
+                        }
+                    }
+                    .listStyle(.inset)
+                }
+            } else {
+                EmptyPanelText("Choose a folder in the toolbar, then find duplicates. No files will be selected or removed.")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .padding(16)
+    }
+}
+
 struct CleanReviewView: View {
     @ObservedObject var model: AppModel
 

@@ -266,6 +266,32 @@ struct AppRestoreOutcome: Codable, Identifiable {
     let error: String?
 }
 
+struct DuplicateReport: Codable {
+    let schemaVersion: Int
+    let root: String
+    let minBytes: UInt64
+    let scannedFiles: UInt64
+    let hashedFiles: UInt64
+    let partial: Bool
+    let errorCount: UInt64
+    let totalWastedBytes: UInt64
+    let groups: [DuplicateGroup]
+}
+
+struct DuplicateGroup: Codable, Identifiable {
+    let id: String
+    let sizeBytes: UInt64
+    let wastedBytes: UInt64
+    let files: [DuplicateFile]
+}
+
+struct DuplicateFile: Codable, Identifiable {
+    var id: String { path }
+    let path: String
+    let sizeBytes: UInt64
+    let modifiedAt: UInt64
+}
+
 struct InstalledApplication: Codable, Identifiable, Equatable {
     var id: String { path }
     let name: String

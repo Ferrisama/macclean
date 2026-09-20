@@ -48,11 +48,18 @@ final class AppModel: ObservableObject {
     @Published var uninstallPlan: UninstallPlan?
     @Published var isLoadingUninstallPlan = false
     @Published var uninstallPlanError: String?
+    @Published var duplicateReport: DuplicateReport?
+    @Published var isScanningDuplicates = false
+    @Published var duplicateError: String?
+    @Published var duplicateMinMB: UInt64 = 10
 
     private let service = MacCleanService()
     private var scanTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var scanJobID: UUID?
+    private var scanGeneration: UInt64 = 0
+    private var duplicateTask: Task<Void, Never>?
+    private var duplicateGeneration: UInt64 = 0
     private var activeScanIsDeep = false
     private var activeScanDepth = 0
     private var activeScanLimit = 0
@@ -136,15 +143,18 @@ final class AppModel: ObservableObject {
     }
 
     func loadCachedScan() {
+        let generation = scanGeneration
         Task {
             do {
                 if let cached = try await service.cachedScan() {
-                    guard !isScanning, scanJobID == nil else { return }
+                    guard scanGeneration == generation, !isScanning, scanJobID == nil else { return }
                     scan = cached
                     selectedItem = cached.largestItems.first
                 }
             } catch {
-                errorMessage = error.localizedDescription
+                if scanGeneration == generation {
+                    errorMessage = error.localizedDescription
+                }
             }
         }
     }
@@ -166,6 +176,8 @@ final class AppModel: ObservableObject {
     }
 
     func refresh(fast: Bool = true) {
+        scanGeneration &+= 1
+        let generation = scanGeneration
         if let activeJobID = scanJobID {
             service.cancelScan(jobID: activeJobID)
             scanTask?.cancel()
@@ -206,24 +218,24 @@ final class AppModel: ObservableObject {
                     jobID: jobID,
                     onProgress: { [weak self] progress in
                         Task { @MainActor [weak self] in
-                            guard self?.scanJobID == jobID else { return }
+                            guard self?.scanJobID == jobID, self?.scanGeneration == generation else { return }
                             self?.apply(progress)
                         }
                     }
                 )
-                guard scanJobID == jobID else { return }
+                guard scanJobID == jobID, scanGeneration == generation else { return }
                 scan = result
                 selectedItem = result.largestItems.first
                 selectedCleanupPaths = selectedCleanupPaths.intersection(Set(result.cleanupCandidates.map(\.path)))
                 scanStage = result.rootScan.partial ? "Complete (partial)" : "Complete"
                 scanProgress = 1.0
             } catch {
-                if scanJobID == jobID, !Task.isCancelled {
+                if scanJobID == jobID, scanGeneration == generation, !Task.isCancelled {
                     errorMessage = error.localizedDescription
                     scanStage = "Failed"
                 }
             }
-            guard scanJobID == jobID else { return }
+            guard scanJobID == jobID, scanGeneration == generation else { return }
             progressTask?.cancel()
             progressTask = nil
             scanTask = nil
@@ -235,6 +247,7 @@ final class AppModel: ObservableObject {
     func cancelScan() {
         guard let jobID = scanJobID else { return }
         service.cancelScan(jobID: jobID)
+        scanGeneration &+= 1
         scanTask?.cancel()
         progressTask?.cancel()
         scanJobID = nil
@@ -243,6 +256,45 @@ final class AppModel: ObservableObject {
         isScanning = false
         scanStage = "Cancelled"
         streamingItems = []
+    }
+
+    func scanDuplicates() {
+        duplicateTask?.cancel()
+        duplicateGeneration &+= 1
+        let generation = duplicateGeneration
+        isScanningDuplicates = true
+        duplicateError = nil
+        duplicateReport = nil
+        let requestedPath = path
+        let requestedMinimum = duplicateMinMB
+        duplicateTask = Task { [self] in
+            defer {
+                if duplicateGeneration == generation {
+                    isScanningDuplicates = false
+                    duplicateTask = nil
+                }
+            }
+            do {
+                let report = try await service.duplicateScan(
+                    path: requestedPath,
+                    minMB: requestedMinimum
+                )
+                guard !Task.isCancelled, duplicateGeneration == generation else { return }
+                duplicateReport = report
+            } catch is CancellationError {
+                // Cancellation is an expected user action.
+            } catch {
+                guard !Task.isCancelled, duplicateGeneration == generation else { return }
+                duplicateError = error.localizedDescription
+            }
+        }
+    }
+
+    func cancelDuplicateScan() {
+        duplicateGeneration &+= 1
+        duplicateTask?.cancel()
+        duplicateTask = nil
+        isScanningDuplicates = false
     }
 
     private func tickScanProgress() {
@@ -546,6 +598,8 @@ struct RootView: View {
             DashboardView(model: model)
         case .map:
             MapView(model: model)
+        case .duplicates:
+            DuplicatesView(model: model)
         case .clean:
             CleanReviewView(model: model)
         case .developer:
@@ -565,6 +619,7 @@ struct RootView: View {
 enum AppTab: String, CaseIterable, Identifiable {
     case dashboard
     case map
+    case duplicates
     case clean
     case developer
     case monitor
@@ -578,6 +633,7 @@ enum AppTab: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: "Dashboard"
         case .map: "Map"
+        case .duplicates: "Duplicates"
         case .clean: "Clean"
         case .developer: "Developer"
         case .monitor: "Monitor"
@@ -591,6 +647,7 @@ enum AppTab: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: "gauge.with.dots.needle.67percent"
         case .map: "square.grid.3x3"
+        case .duplicates: "doc.on.doc"
         case .clean: "checklist"
         case .developer: "hammer"
         case .monitor: "waveform.path.ecg"

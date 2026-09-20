@@ -147,6 +147,12 @@ pub enum Commands {
         #[arg(required = true)]
         paths: Vec<std::path::PathBuf>,
     },
+    #[command(name = "app-dupes")]
+    AppDupes {
+        path: std::path::PathBuf,
+        #[arg(long = "min", default_value_t = 10u64)]
+        min_mb: u64,
+    },
     Largest {
         #[arg(long, default_value_t = 100u64)]
         min_mb: u64,
@@ -396,6 +402,7 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
         Commands::AppHistory { limit } => run_app_history(limit),
         Commands::AppRestore { session } => run_app_restore(session),
         Commands::AppTrash { paths } => run_app_trash(paths, dry_run),
+        Commands::AppDupes { path, min_mb } => run_app_dupes(path, min_mb),
         Commands::Largest {
             min_mb,
             limit,
@@ -455,6 +462,13 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
         } => cleaners::update::run(!no_brew, !no_pip, !no_npm),
         Commands::QuitApps { configure } => cleaners::quit_apps::run(configure, dry_run, yes),
     }
+}
+
+fn run_app_dupes(path: std::path::PathBuf, min_mb: u64) -> Result<()> {
+    let min_bytes = min_mb.saturating_mul(1024 * 1024);
+    let report = cleaners::dupes::analyze(&path, min_bytes)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
 }
 
 #[derive(Serialize)]

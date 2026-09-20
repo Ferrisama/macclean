@@ -62,7 +62,10 @@ Analyzing, scanning, and building an uninstall plan all run in the background, s
 
 ## Native macOS app
 
-The repository also includes a SwiftUI desktop app with Fast and Deep scans, streamed Map results, cleanup review, History, Full Disk Access guidance, and read-only uninstall plans. Build a self-contained bundle with:
+The repository also includes a SwiftUI desktop app with Fast and Deep scans,
+streamed Map results, content-verified read-only duplicate groups, cleanup
+review, History, Full Disk Access guidance, and recoverable uninstall. Build a
+self-contained bundle with:
 
 ```bash
 ./scripts/build-swiftui-app.sh

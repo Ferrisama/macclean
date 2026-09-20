@@ -31,13 +31,18 @@ test -x "$APP/Contents/MacOS/MacCleanApp"
 test -x "$BACKEND"
 codesign --verify --deep --strict "$APP"
 
-mkdir -p "$SCAN_ROOT/folder" "$CACHE_PATH"
+mkdir -p "$SCAN_ROOT/folder" "$SCAN_ROOT/duplicates" "$CACHE_PATH"
 printf 'scan fixture\n' > "$SCAN_ROOT/folder/file.txt"
+printf 'duplicate fixture\n' > "$SCAN_ROOT/duplicates/a.txt"
+cp "$SCAN_ROOT/duplicates/a.txt" "$SCAN_ROOT/duplicates/b.txt"
 printf 'cleanup fixture\n' > "$CACHE_PATH/payload.txt"
 
 MACCLEAN_STATE_DIR="$STATE_DIR" "$BACKEND" app-scan "$SCAN_ROOT" \
   --depth 1 --limit 10 --no-system-data --no-health \
   | jq -e '.root_scan.tree.size_bytes > 0 and .root_scan.partial == false' >/dev/null
+
+MACCLEAN_STATE_DIR="$STATE_DIR" "$BACKEND" app-dupes "$SCAN_ROOT" --min 0 \
+  | jq -e '.partial == false and (.groups | length == 1)' >/dev/null
 
 MACCLEAN_STATE_DIR="$STATE_DIR" "$BACKEND" --dry-run app-trash "$CACHE_PATH" \
   | jq -e '.dry_run == true and .failed_count == 0 and .moved_count == 0' >/dev/null

@@ -244,6 +244,15 @@ final class MacCleanService {
         return try JSONDecoder.macclean.decode(UninstallPlan.self, from: data)
     }
 
+    func duplicateScan(path: String, minMB: UInt64) async throws -> DuplicateReport {
+        let executable = try resolveBinary()
+        let data = try await run(
+            executable: executable,
+            arguments: ["app-dupes", path, "--min", String(minMB)]
+        )
+        return try JSONDecoder.macclean.decode(DuplicateReport.self, from: data)
+    }
+
     func trash(paths: [String], dryRun: Bool = false) async throws -> AppTrashResponse {
         let executable = try resolveBinary()
         var arguments: [String] = []
