@@ -384,10 +384,7 @@ fn build_recipe(def: RecipeDef) -> CleanupRecipe {
 }
 
 fn app_cache_dir() -> Result<PathBuf> {
-    let Some(home) = dirs::home_dir() else {
-        anyhow::bail!("Could not find home directory.");
-    };
-    Ok(home.join("Library/Application Support/macclean/scans"))
+    Ok(crate::core::state_dir()?.join("scans"))
 }
 
 fn safety_items(root: &StorageNode, root_size: u64) -> Vec<AppScanItem> {

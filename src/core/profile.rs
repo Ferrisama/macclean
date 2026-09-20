@@ -60,10 +60,7 @@ pub fn remove(name: &str) -> Result<()> {
 }
 
 pub fn config_path() -> Result<PathBuf> {
-    let Some(home) = dirs::home_dir() else {
-        bail!("Could not find home directory.");
-    };
-    Ok(home.join("Library/Application Support/macclean/profiles.toml"))
+    Ok(crate::core::state_dir()?.join("profiles.toml"))
 }
 
 fn load_config() -> Result<ProfileConfig> {
