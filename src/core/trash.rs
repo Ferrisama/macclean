@@ -53,16 +53,41 @@ pub struct TrashItemResult {
 /// Performs a Trash-backed cleanup and returns the durable session identifier
 /// used for its receipt and History records.
 pub fn trash_clean_items_with_session(cleaner: &str, items: &[CleanItem]) -> TrashCleanResult {
+    trash_clean_items_impl(cleaner, items, None)
+}
+
+/// Executes a cleanup whose targets were previously reviewed by the app.
+/// Every item must have a matching identity, which is checked immediately
+/// before that item is handed to the operating system's Trash operation.
+pub fn trash_reviewed_clean_items_with_session(
+    cleaner: &str,
+    items: &[CleanItem],
+    identities: &[safety::FileIdentity],
+) -> TrashCleanResult {
+    trash_clean_items_impl(cleaner, items, Some(identities))
+}
+
+fn trash_clean_items_impl(
+    cleaner: &str,
+    items: &[CleanItem],
+    identities: Option<&[safety::FileIdentity]>,
+) -> TrashCleanResult {
     let session_id = history::new_session_id(cleaner);
     let mut outcomes = Vec::new();
     let mut receipt_items = Vec::new();
 
-    for item in items {
+    for (index, item) in items.iter().enumerate() {
         let path = item.path.clone();
         let preflight_error = if !item.removable {
             Some("item is not marked removable".to_string())
         } else if !path.exists() {
             Some(format!("path no longer exists: {}", path.display()))
+        } else if let Some(identities) = identities {
+            identities
+                .get(index)
+                .ok_or_else(|| "missing reviewed identity; review cleanup again".to_string())
+                .and_then(|identity| safety::validate_identity(&path, identity).map(|_| ()))
+                .err()
         } else {
             safety::validate_removal(&path).err()
         };

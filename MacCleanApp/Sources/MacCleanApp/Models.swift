@@ -249,6 +249,7 @@ struct AppTrashOutcome: Codable, Identifiable {
     let moved: Bool
     let trashPath: String?
     let error: String?
+    var reviewToken: String? = nil
 }
 
 struct AppRestoreResponse: Codable {
@@ -276,6 +277,20 @@ struct DuplicateReport: Codable {
     let errorCount: UInt64
     let totalWastedBytes: UInt64
     let groups: [DuplicateGroup]
+}
+
+struct DuplicateScanProgress: Codable {
+    let stage: String
+    let scannedFiles: UInt64
+    let candidateFiles: UInt64
+    let processedCandidateFiles: UInt64
+    let hashedFiles: UInt64
+    let errorCount: UInt64
+
+    var fraction: Double? {
+        guard stage == "hashing", candidateFiles > 0 else { return nil }
+        return min(1, Double(processedCandidateFiles) / Double(candidateFiles))
+    }
 }
 
 struct DuplicateGroup: Codable, Identifiable {

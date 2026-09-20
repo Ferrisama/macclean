@@ -195,9 +195,15 @@ struct DuplicatesView: View {
             }
 
             if model.isScanningDuplicates {
-                HStack(spacing: 10) {
-                    ProgressView()
-                    Text("Scanning \(model.path) and hashing same-size candidates…")
+                VStack(alignment: .leading, spacing: 8) {
+                    if let fraction = model.duplicateProgress?.fraction {
+                        ProgressView(value: fraction)
+                    } else {
+                        ProgressView()
+                    }
+                    Text(model.duplicateProgress?.stage == "hashing"
+                        ? "Hashing \(model.duplicateProgress?.processedCandidateFiles ?? 0) of \(model.duplicateProgress?.candidateFiles ?? 0) same-size candidates"
+                        : "Discovering files… \(model.duplicateProgress?.scannedFiles ?? 0) examined")
                         .foregroundStyle(.secondary)
                 }
             } else if let error = model.duplicateError {

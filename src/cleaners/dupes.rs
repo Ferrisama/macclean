@@ -3,13 +3,43 @@ use crate::ui::{self, format_size};
 use anyhow::Result;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use rayon::prelude::*;
+use rayon::Scope;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateScanStage {
+    Discovering,
+    Hashing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DuplicateScanProgress {
+    pub stage: DuplicateScanStage,
+    pub scanned_files: u64,
+    pub candidate_files: u64,
+    pub processed_candidate_files: u64,
+    pub hashed_files: u64,
+    pub error_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DuplicateScanCancelled;
+
+impl fmt::Display for DuplicateScanCancelled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("duplicate scan cancelled")
+    }
+}
+
+impl std::error::Error for DuplicateScanCancelled {}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DuplicateFile {
@@ -40,6 +70,19 @@ pub struct DuplicateReport {
 }
 
 pub fn analyze(root: &Path, min_bytes: u64) -> Result<DuplicateReport> {
+    analyze_with_control(root, min_bytes, |_| {}, || false)
+}
+
+pub fn analyze_with_control<P, C>(
+    root: &Path,
+    min_bytes: u64,
+    mut on_progress: P,
+    should_cancel: C,
+) -> Result<DuplicateReport>
+where
+    P: FnMut(DuplicateScanProgress) + Send,
+    C: Fn() -> bool + Sync,
+{
     let root = std::fs::canonicalize(root)?;
     if !root.is_dir() {
         anyhow::bail!("Duplicate scan root is not a directory: {}", root.display());
@@ -48,11 +91,28 @@ pub fn analyze(root: &Path, min_bytes: u64) -> Result<DuplicateReport> {
     let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
     let mut scanned_files = 0_u64;
     let mut error_count = 0_u64;
+    on_progress(DuplicateScanProgress {
+        stage: DuplicateScanStage::Discovering,
+        scanned_files,
+        candidate_files: 0,
+        processed_candidate_files: 0,
+        hashed_files: 0,
+        error_count,
+    });
     for entry in WalkDir::new(&root).follow_links(false) {
+        cancel_if_requested(&should_cancel)?;
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => {
                 error_count += 1;
+                on_progress(DuplicateScanProgress {
+                    stage: DuplicateScanStage::Discovering,
+                    scanned_files,
+                    candidate_files: 0,
+                    processed_candidate_files: 0,
+                    hashed_files: 0,
+                    error_count,
+                });
                 continue;
             }
         };
@@ -70,30 +130,70 @@ pub fn analyze(root: &Path, min_bytes: u64) -> Result<DuplicateReport> {
             Ok(_) => {}
             Err(_) => error_count += 1,
         }
+        on_progress(DuplicateScanProgress {
+            stage: DuplicateScanStage::Discovering,
+            scanned_files,
+            candidate_files: 0,
+            processed_candidate_files: 0,
+            hashed_files: 0,
+            error_count,
+        });
     }
 
     let candidates: Vec<_> = by_size
         .into_iter()
         .filter(|(_, paths)| paths.len() > 1)
         .collect();
-    let hashed: Vec<_> = candidates
-        .par_iter()
-        .flat_map_iter(|(size, paths)| {
-            paths
-                .iter()
-                .map(|path| (path.clone(), *size, hash_file(path)))
-        })
-        .collect();
+    let candidate_files = candidates.iter().fold(0_u64, |total, (_, paths)| {
+        total.saturating_add(paths.len() as u64)
+    });
     let mut by_hash: HashMap<String, Vec<(PathBuf, u64)>> = HashMap::new();
     let mut hashed_files = 0_u64;
-    for (path, size, hash) in hashed {
-        if let Some(hash) = hash {
-            hashed_files += 1;
-            by_hash.entry(hash).or_default().push((path, size));
-        } else {
-            error_count += 1;
+    let mut processed_candidate_files = 0_u64;
+    on_progress(DuplicateScanProgress {
+        stage: DuplicateScanStage::Hashing,
+        scanned_files,
+        candidate_files,
+        processed_candidate_files,
+        hashed_files,
+        error_count,
+    });
+    let work: Vec<_> = candidates
+        .into_iter()
+        .flat_map(|(size, paths)| paths.into_iter().map(move |path| (path, size)))
+        .collect();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    rayon::scope(|scope: &Scope<'_>| -> Result<()> {
+        for (path, size) in work {
+            let sender = sender.clone();
+            let should_cancel = &should_cancel;
+            scope.spawn(move |_| {
+                let result = hash_file_with_cancel(&path, should_cancel);
+                let _ = sender.send((path, size, result));
+            });
         }
-    }
+        drop(sender);
+
+        for (path, size, result) in receiver {
+            match result? {
+                Some(hash) => {
+                    hashed_files += 1;
+                    by_hash.entry(hash).or_default().push((path, size));
+                }
+                None => error_count += 1,
+            }
+            processed_candidate_files += 1;
+            on_progress(DuplicateScanProgress {
+                stage: DuplicateScanStage::Hashing,
+                scanned_files,
+                candidate_files,
+                processed_candidate_files,
+                hashed_files,
+                error_count,
+            });
+        }
+        Ok(())
+    })?;
 
     let mut groups: Vec<DuplicateGroup> = by_hash
         .into_iter()
@@ -338,11 +438,38 @@ fn modified_secs(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn hash_file(path: &Path) -> Option<String> {
-    let mut file = std::fs::File::open(path).ok()?;
+fn cancel_if_requested<C>(should_cancel: &C) -> Result<()>
+where
+    C: Fn() -> bool,
+{
+    if should_cancel() {
+        return Err(DuplicateScanCancelled.into());
+    }
+    Ok(())
+}
+
+fn hash_file_with_cancel<C>(path: &Path, should_cancel: &C) -> Result<Option<String>>
+where
+    C: Fn() -> bool + Sync,
+{
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher).ok()?;
-    Some(format!("{:x}", hasher.finalize()))
+    let mut buffer = [0_u8; 256 * 1024];
+    loop {
+        cancel_if_requested(should_cancel)?;
+        let read = match file.read(&mut buffer) {
+            Ok(read) => read,
+            Err(_) => return Ok(None),
+        };
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(Some(format!("{:x}", hasher.finalize())))
 }
 
 #[cfg(test)]
@@ -376,5 +503,85 @@ mod tests {
 
         assert!(report.groups.is_empty());
         assert_eq!(report.hashed_files, 0);
+    }
+
+    #[test]
+    fn progress_reports_discovery_then_measurable_hashing() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.bin"), b"same bytes").unwrap();
+        std::fs::write(dir.path().join("b.bin"), b"same bytes").unwrap();
+        std::fs::write(dir.path().join("unique.bin"), b"unique content").unwrap();
+
+        let mut updates = Vec::new();
+        let report =
+            analyze_with_control(dir.path(), 1, |progress| updates.push(progress), || false)
+                .unwrap();
+
+        assert_eq!(
+            updates.first().unwrap().stage,
+            DuplicateScanStage::Discovering
+        );
+        let hashing: Vec<_> = updates
+            .iter()
+            .filter(|progress| progress.stage == DuplicateScanStage::Hashing)
+            .collect();
+        assert!(!hashing.is_empty());
+        assert_eq!(hashing[0].candidate_files, 2);
+        assert_eq!(hashing[0].processed_candidate_files, 0);
+        assert_eq!(hashing.last().unwrap().processed_candidate_files, 2);
+        assert_eq!(hashing.last().unwrap().hashed_files, 2);
+        assert_eq!(report.hashed_files, 2);
+    }
+
+    #[test]
+    fn cancellation_stops_during_discovery_with_typed_error() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.bin"), b"same bytes").unwrap();
+        std::fs::write(dir.path().join("b.bin"), b"same bytes").unwrap();
+        let cancelled = AtomicBool::new(false);
+
+        let error = analyze_with_control(
+            dir.path(),
+            1,
+            |progress| {
+                if progress.stage == DuplicateScanStage::Discovering && progress.scanned_files == 1
+                {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+            },
+            || cancelled.load(Ordering::Relaxed),
+        )
+        .unwrap_err();
+
+        assert!(error.downcast_ref::<DuplicateScanCancelled>().is_some());
+        assert_eq!(error.to_string(), "duplicate scan cancelled");
+    }
+
+    #[test]
+    fn cancellation_stops_before_hashing_candidates() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.bin"), b"same bytes").unwrap();
+        std::fs::write(dir.path().join("b.bin"), b"same bytes").unwrap();
+        let cancelled = AtomicBool::new(false);
+
+        let error = analyze_with_control(
+            dir.path(),
+            1,
+            |progress| {
+                if progress.stage == DuplicateScanStage::Hashing {
+                    assert_eq!(progress.candidate_files, 2);
+                    assert_eq!(progress.processed_candidate_files, 0);
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+            },
+            || cancelled.load(Ordering::Relaxed),
+        )
+        .unwrap_err();
+
+        assert!(error.downcast_ref::<DuplicateScanCancelled>().is_some());
     }
 }

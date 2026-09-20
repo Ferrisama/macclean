@@ -146,12 +146,16 @@ pub enum Commands {
     AppTrash {
         #[arg(required = true)]
         paths: Vec<std::path::PathBuf>,
+        #[arg(long = "review-token")]
+        review_tokens: Vec<String>,
     },
     #[command(name = "app-dupes")]
     AppDupes {
         path: std::path::PathBuf,
         #[arg(long = "min", default_value_t = 10u64)]
         min_mb: u64,
+        #[arg(long, hide = true)]
+        progress: bool,
     },
     Largest {
         #[arg(long, default_value_t = 100u64)]
@@ -401,8 +405,15 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
         Commands::AppUninstallPlan { path, deep } => run_app_uninstall_plan(path, deep),
         Commands::AppHistory { limit } => run_app_history(limit),
         Commands::AppRestore { session } => run_app_restore(session),
-        Commands::AppTrash { paths } => run_app_trash(paths, dry_run),
-        Commands::AppDupes { path, min_mb } => run_app_dupes(path, min_mb),
+        Commands::AppTrash {
+            paths,
+            review_tokens,
+        } => run_app_trash(paths, review_tokens, dry_run),
+        Commands::AppDupes {
+            path,
+            min_mb,
+            progress,
+        } => run_app_dupes(path, min_mb, progress),
         Commands::Largest {
             min_mb,
             limit,
@@ -464,10 +475,37 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
     }
 }
 
-fn run_app_dupes(path: std::path::PathBuf, min_mb: u64) -> Result<()> {
+fn run_app_dupes(path: std::path::PathBuf, min_mb: u64, progress: bool) -> Result<()> {
     let min_bytes = min_mb.saturating_mul(1024 * 1024);
-    let report = cleaners::dupes::analyze(&path, min_bytes)?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    if progress {
+        let mut last_discovery_report = 0_u64;
+        let report = cleaners::dupes::analyze_with_control(
+            &path,
+            min_bytes,
+            |update| {
+                let should_emit = match update.stage {
+                    cleaners::dupes::DuplicateScanStage::Discovering => {
+                        update.scanned_files == 0
+                            || update.scanned_files.saturating_sub(last_discovery_report) >= 100
+                    }
+                    cleaners::dupes::DuplicateScanStage::Hashing => true,
+                };
+                if should_emit {
+                    last_discovery_report = update.scanned_files;
+                    println!(
+                        "{}",
+                        serde_json::json!({"type": "progress", "data": update})
+                    );
+                    let _ = std::io::stdout().flush();
+                }
+            },
+            || false,
+        )?;
+        println!("{}", serde_json::json!({"type": "result", "data": report}));
+    } else {
+        let report = cleaners::dupes::analyze(&path, min_bytes)?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    }
     Ok(())
 }
 
@@ -478,6 +516,8 @@ struct AppTrashItemOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     trash_path: Option<std::path::PathBuf>,
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -796,7 +836,18 @@ fn run_app_restore(session: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
+fn run_app_trash(
+    paths: Vec<std::path::PathBuf>,
+    review_tokens: Vec<String>,
+    dry_run: bool,
+) -> Result<()> {
+    let reviewed_identities: Vec<_> = review_tokens
+        .iter()
+        .filter_map(|token| crate::core::safety::parse_review_token(token).ok())
+        .collect();
+    let malformed_token_count = review_tokens
+        .len()
+        .saturating_sub(reviewed_identities.len());
     let mut items = Vec::new();
     let mut response_outcomes = Vec::new();
     for path in paths {
@@ -806,6 +857,7 @@ fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
                 moved: false,
                 trash_path: None,
                 error: Some("Path no longer exists; refresh the scan and try again.".into()),
+                review_token: None,
             });
             continue;
         }
@@ -817,6 +869,7 @@ fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
                     moved: false,
                     trash_path: None,
                     error: Some(error),
+                    review_token: None,
                 });
                 continue;
             }
@@ -827,6 +880,7 @@ fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
                 moved: false,
                 trash_path: None,
                 error: Some(error),
+                review_token: None,
             });
             continue;
         }
@@ -836,6 +890,7 @@ fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
                 moved: false,
                 trash_path: None,
                 error: Some("Refusing app cleanup for an unclassified or protected path.".into()),
+                review_token: None,
             });
             continue;
         }
@@ -880,6 +935,7 @@ fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
                 error: Some(
                     "Already covered by a selected parent folder; deselect this item.".into(),
                 ),
+                review_token: None,
             });
         } else if non_overlapping
             .iter()
@@ -896,34 +952,70 @@ fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
         .map(|item| item.size_bytes)
         .sum();
     let (session_id, receipt_error, outcomes) = if dry_run {
-        (
-            None,
-            None,
-            items
-                .iter()
-                .filter(|item| item.removable)
-                .map(|item| crate::core::trash::TrashItemResult {
+        let outcomes: Vec<AppTrashItemOutcome> = items
+            .iter()
+            .filter(|item| item.removable)
+            .map(|item| {
+                let token = crate::core::safety::capture_identity(&item.path)
+                    .and_then(|identity| crate::core::safety::issue_review_token(&identity));
+                AppTrashItemOutcome {
                     path: item.path.clone(),
                     moved: false,
                     trash_path: None,
-                    error: None,
-                })
-                .collect(),
-        )
+                    error: token.as_ref().err().cloned(),
+                    review_token: token.ok(),
+                }
+            })
+            .collect();
+        (None, None, outcomes)
     } else {
-        let result = crate::core::trash::trash_clean_items_with_session("app-review", &items);
+        let mut executable_items = Vec::new();
+        let mut executable_identities = Vec::new();
+        for item in &items {
+            match reviewed_identities
+                .iter()
+                .find(|identity| identity.canonical_path == item.path)
+            {
+                Some(identity) => {
+                    executable_items.push(item.clone());
+                    executable_identities.push(identity.clone());
+                }
+                None => response_outcomes.push(AppTrashItemOutcome {
+                    path: item.path.clone(),
+                    moved: false,
+                    trash_path: None,
+                    error: Some(if malformed_token_count > 0 {
+                        "Invalid cleanup review token; review cleanup again.".into()
+                    } else {
+                        "Missing reviewed identity; review cleanup again before moving this item."
+                            .into()
+                    }),
+                    review_token: None,
+                }),
+            }
+        }
+        let result = crate::core::trash::trash_reviewed_clean_items_with_session(
+            "app-review",
+            &executable_items,
+            &executable_identities,
+        );
         (
             Some(result.session_id),
             result.receipt_error,
-            result.outcomes,
+            result
+                .outcomes
+                .into_iter()
+                .map(|outcome| AppTrashItemOutcome {
+                    path: outcome.path,
+                    moved: outcome.moved,
+                    trash_path: outcome.trash_path,
+                    error: outcome.error,
+                    review_token: None,
+                })
+                .collect(),
         )
     };
-    response_outcomes.extend(outcomes.into_iter().map(|outcome| AppTrashItemOutcome {
-        path: outcome.path,
-        moved: outcome.moved,
-        trash_path: outcome.trash_path,
-        error: outcome.error,
-    }));
+    response_outcomes.extend(outcomes);
     let moved_count = if dry_run {
         0
     } else {

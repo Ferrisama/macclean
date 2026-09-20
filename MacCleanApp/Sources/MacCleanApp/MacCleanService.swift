@@ -244,16 +244,41 @@ final class MacCleanService {
         return try JSONDecoder.macclean.decode(UninstallPlan.self, from: data)
     }
 
-    func duplicateScan(path: String, minMB: UInt64) async throws -> DuplicateReport {
+    func duplicateScan(
+        path: String,
+        minMB: UInt64,
+        jobID: UUID,
+        onProgress: @escaping @Sendable (DuplicateScanProgress) -> Void
+    ) async throws -> DuplicateReport {
         let executable = try resolveBinary()
-        let data = try await run(
+        let data = try await runStreaming(
             executable: executable,
-            arguments: ["app-dupes", path, "--min", String(minMB)]
-        )
+            arguments: ["app-dupes", path, "--min", String(minMB), "--progress"],
+            jobID: jobID
+        ) { line in
+            guard let lineData = line.data(using: .utf8),
+                  let envelope = try? JSONDecoder.macclean.decode(
+                    DuplicateProgressEnvelope.self,
+                    from: lineData
+                  ),
+                  envelope.type == "progress",
+                  let progress = envelope.data
+            else { return }
+            onProgress(progress)
+        }
         return try JSONDecoder.macclean.decode(DuplicateReport.self, from: data)
     }
 
-    func trash(paths: [String], dryRun: Bool = false) async throws -> AppTrashResponse {
+    private struct DuplicateProgressEnvelope: Decodable {
+        let type: String
+        let data: DuplicateScanProgress?
+    }
+
+    func trash(
+        paths: [String],
+        reviewTokens: [String] = [],
+        dryRun: Bool = false
+    ) async throws -> AppTrashResponse {
         let executable = try resolveBinary()
         var arguments: [String] = []
         if dryRun {
@@ -261,6 +286,9 @@ final class MacCleanService {
         }
         arguments.append("app-trash")
         arguments.append(contentsOf: paths)
+        for token in reviewTokens {
+            arguments.append(contentsOf: ["--review-token", token])
+        }
         let data = try await run(executable: executable, arguments: arguments)
         return try JSONDecoder.macclean.decode(AppTrashResponse.self, from: data)
     }

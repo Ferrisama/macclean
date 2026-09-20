@@ -52,14 +52,16 @@ final class AppModel: ObservableObject {
     @Published var isScanningDuplicates = false
     @Published var duplicateError: String?
     @Published var duplicateMinMB: UInt64 = 10
+    @Published var duplicateProgress: DuplicateScanProgress?
 
     private let service = MacCleanService()
     private var scanTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
-    private var scanJobID: UUID?
-    private var scanGeneration: UInt64 = 0
+    private var scanOwnership = ScanGenerationOwnership()
     private var duplicateTask: Task<Void, Never>?
     private var duplicateGeneration: UInt64 = 0
+    private var duplicateJobID: UUID?
+    private var cleanupReviewTokens: [String: String] = [:]
     private var activeScanIsDeep = false
     private var activeScanDepth = 0
     private var activeScanLimit = 0
@@ -143,16 +145,18 @@ final class AppModel: ObservableObject {
     }
 
     func loadCachedScan() {
-        let generation = scanGeneration
+        let generation = scanOwnership.generation
         Task {
             do {
                 if let cached = try await service.cachedScan() {
-                    guard scanGeneration == generation, !isScanning, scanJobID == nil else { return }
+                    guard scanOwnership.generation == generation,
+                          !isScanning,
+                          scanOwnership.activeJobID == nil else { return }
                     scan = cached
                     selectedItem = cached.largestItems.first
                 }
             } catch {
-                if scanGeneration == generation {
+                if scanOwnership.generation == generation {
                     errorMessage = error.localizedDescription
                 }
             }
@@ -176,14 +180,12 @@ final class AppModel: ObservableObject {
     }
 
     func refresh(fast: Bool = true) {
-        scanGeneration &+= 1
-        let generation = scanGeneration
-        if let activeJobID = scanJobID {
+        if let activeJobID = scanOwnership.activeJobID {
             service.cancelScan(jobID: activeJobID)
             scanTask?.cancel()
         }
-        let jobID = UUID()
-        scanJobID = jobID
+        let ticket = scanOwnership.begin()
+        let jobID = ticket.jobID
         isScanning = true
         errorMessage = nil
         scanStartedAt = Date()
@@ -218,39 +220,37 @@ final class AppModel: ObservableObject {
                     jobID: jobID,
                     onProgress: { [weak self] progress in
                         Task { @MainActor [weak self] in
-                            guard self?.scanJobID == jobID, self?.scanGeneration == generation else { return }
+                            guard self?.scanOwnership.accepts(ticket) == true else { return }
                             self?.apply(progress)
                         }
                     }
                 )
-                guard scanJobID == jobID, scanGeneration == generation else { return }
+                guard scanOwnership.accepts(ticket) else { return }
                 scan = result
                 selectedItem = result.largestItems.first
                 selectedCleanupPaths = selectedCleanupPaths.intersection(Set(result.cleanupCandidates.map(\.path)))
                 scanStage = result.rootScan.partial ? "Complete (partial)" : "Complete"
                 scanProgress = 1.0
             } catch {
-                if scanJobID == jobID, scanGeneration == generation, !Task.isCancelled {
+                if scanOwnership.accepts(ticket), !Task.isCancelled {
                     errorMessage = error.localizedDescription
                     scanStage = "Failed"
                 }
             }
-            guard scanJobID == jobID, scanGeneration == generation else { return }
+            guard scanOwnership.complete(ticket) else { return }
             progressTask?.cancel()
             progressTask = nil
             scanTask = nil
-            scanJobID = nil
             isScanning = false
         }
     }
 
     func cancelScan() {
-        guard let jobID = scanJobID else { return }
+        guard let jobID = scanOwnership.activeJobID else { return }
         service.cancelScan(jobID: jobID)
-        scanGeneration &+= 1
+        scanOwnership.cancel()
         scanTask?.cancel()
         progressTask?.cancel()
-        scanJobID = nil
         scanTask = nil
         progressTask = nil
         isScanning = false
@@ -265,19 +265,31 @@ final class AppModel: ObservableObject {
         isScanningDuplicates = true
         duplicateError = nil
         duplicateReport = nil
+        duplicateProgress = nil
         let requestedPath = path
         let requestedMinimum = duplicateMinMB
+        let jobID = UUID()
+        duplicateJobID = jobID
         duplicateTask = Task { [self] in
             defer {
                 if duplicateGeneration == generation {
                     isScanningDuplicates = false
+                    duplicateJobID = nil
                     duplicateTask = nil
                 }
             }
             do {
                 let report = try await service.duplicateScan(
                     path: requestedPath,
-                    minMB: requestedMinimum
+                    minMB: requestedMinimum,
+                    jobID: jobID,
+                    onProgress: { [weak self] progress in
+                        Task { @MainActor [weak self] in
+                            guard self?.duplicateGeneration == generation,
+                                  self?.duplicateJobID == jobID else { return }
+                            self?.duplicateProgress = progress
+                        }
+                    }
                 )
                 guard !Task.isCancelled, duplicateGeneration == generation else { return }
                 duplicateReport = report
@@ -292,6 +304,10 @@ final class AppModel: ObservableObject {
 
     func cancelDuplicateScan() {
         duplicateGeneration &+= 1
+        if let duplicateJobID {
+            service.cancelScan(jobID: duplicateJobID)
+        }
+        duplicateJobID = nil
         duplicateTask?.cancel()
         duplicateTask = nil
         isScanningDuplicates = false
@@ -360,16 +376,14 @@ final class AppModel: ObservableObject {
     }
 
     func open(_ item: AppScanItem) {
-        guard item.isDir else {
+        switch NavigationRules.opening(path: item.path, isDirectory: item.isDir) {
+        case .selectFile:
             selectedItem = item
-            return
+        case .scanDirectory(let target):
+            beginNavigation(to: target)
+        case .stay:
+            break
         }
-        path = item.path
-        // Do not leave the old folder's map visible while the new scope is
-        // being measured; that made successful navigation look like a no-op.
-        scan = nil
-        selectedItem = nil
-        refresh()
     }
 
     func openInMap(_ item: AppScanItem) {
@@ -378,17 +392,19 @@ final class AppModel: ObservableObject {
     }
 
     func goUp() {
-        let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
-        if parent != path, !parent.isEmpty {
-            path = parent
-            scan = nil
-            selectedItem = nil
-            refresh()
+        if case .scanDirectory(let target) = NavigationRules.parent(of: path) {
+            beginNavigation(to: target)
         }
     }
 
     func navigate(to newPath: String) {
-        path = newPath
+        if case .scanDirectory(let target) = NavigationRules.navigating(to: newPath) {
+            beginNavigation(to: target)
+        }
+    }
+
+    private func beginNavigation(to target: String) {
+        path = target
         scan = nil
         selectedItem = nil
         refresh()
@@ -433,33 +449,35 @@ final class AppModel: ObservableObject {
     }
 
     func toggleCleanup(_ item: AppScanItem) {
-        guard item.canMoveToTrash else { return }
-        if selectedCleanupPaths.contains(item.path) {
-            selectedCleanupPaths.remove(item.path)
-        } else {
-            selectedCleanupPaths.insert(item.path)
-        }
+        cleanupReviewTokens.removeAll()
+        selectedCleanupPaths = CleanupSelectionRules.toggling(
+            path: item.path,
+            isSelectable: item.canMoveToTrash,
+            in: selectedCleanupPaths
+        )
     }
 
     func selectSafeCandidates(in scan: AppScan) {
-        selectedCleanupPaths = Set(scan.cleanupCandidates.filter { $0.safety == .safe }.map(\.path))
+        cleanupReviewTokens.removeAll()
+        selectedCleanupPaths = CleanupSelectionRules.safeSelectablePaths(in: scan.cleanupCandidates)
     }
 
     func selectSafeCandidates(from items: [AppScanItem]) {
+        cleanupReviewTokens.removeAll()
         selectedRecipe = nil
-        selectedCleanupPaths = Set(items.filter { $0.safety == .safe }.map(\.path))
+        selectedCleanupPaths = CleanupSelectionRules.safeSelectablePaths(in: items)
     }
 
     func clearCleanupSelection() {
+        cleanupReviewTokens.removeAll()
         selectedCleanupPaths.removeAll()
         selectedRecipe = nil
     }
 
     func selectRecipePaths(_ recipe: CleanupRecipe) {
+        cleanupReviewTokens.removeAll()
         selectedRecipe = recipe
-        selectedCleanupPaths = Set(recipe.items.filter { item in
-            item.appEligible && item.path != "/dev/null"
-        }.map(\.path))
+        selectedCleanupPaths = CleanupSelectionRules.selectableRecipePaths(in: recipe)
         selectedItem = recipeCandidateItems().first
         selectedTab = .clean
     }
@@ -472,9 +490,15 @@ final class AppModel: ObservableObject {
         cleanupMessage = nil
         cleanupOutcomes = []
         let paths = Array(selectedCleanupPaths)
+        let tokens = paths.compactMap { cleanupReviewTokens[$0] }
+        guard tokens.count == paths.count else {
+            isCleaning = false
+            cleanupMessage = "Cleanup review expired. Review the selected paths again."
+            return
+        }
         Task {
             do {
-                let response = try await service.trash(paths: paths)
+                let response = try await service.trash(paths: paths, reviewTokens: tokens)
                 let failureDetail = response.outcomes
                     .compactMap(\.error)
                     .first
@@ -484,6 +508,7 @@ final class AppModel: ObservableObject {
                 cleanupMessage = "Moved \(response.movedCount) item(s) (\(formatBytes(response.movedBytes))) to Trash; \(formatBytes(response.reclaimedBytes)) reclaimed until Trash is emptied. \(response.failedCount) failed.\(sessionDetail)\(failureDetail)\(receiptDetail)"
                 cleanupOutcomes = response.outcomes
                 selectedCleanupPaths.removeAll()
+                cleanupReviewTokens.removeAll()
                 selectedRecipe = nil
                 loadHistory()
                 loadRecipes()
@@ -511,10 +536,12 @@ final class AppModel: ObservableObject {
             defer { isCleaning = false }
             do {
                 let response = try await service.trash(paths: paths, dryRun: true)
-                let eligiblePaths = Set(response.outcomes
-                    .filter { $0.error == nil }
-                    .map(\.path))
-                selectedCleanupPaths.formIntersection(eligiblePaths)
+                cleanupReviewTokens = Dictionary(uniqueKeysWithValues: response.outcomes.compactMap {
+                    guard $0.error == nil, let token = $0.reviewToken else { return nil }
+                    return ($0.path, token)
+                })
+                selectedCleanupPaths.formIntersection(cleanupReviewTokens.keys)
+                let eligiblePaths = selectedCleanupPaths
                 let failures = response.outcomes.filter { $0.error != nil }
                 cleanupOutcomes = failures
                 if eligiblePaths.isEmpty {
