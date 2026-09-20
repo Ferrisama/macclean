@@ -43,6 +43,13 @@ macclean-vX.Y.Z-x86_64-apple-darwin.tar.gz.sha256
 
 ## Sign and notarize
 
+The SwiftUI bundle build uses `MACCLEAN_SIGN_IDENTITY` when set, otherwise it
+uses `MacClean Local Development` when that identity is installed. It signs the
+embedded Rust backend first and the outer app last. Run
+`scripts/setup-local-signing.sh` once to keep Full Disk Access attached to local
+development rebuilds. That self-signed identity is strictly for local use and
+cannot replace Developer ID signing or notarization.
+
 Prerequisites:
 
 - Apple Developer Program membership

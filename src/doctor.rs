@@ -334,6 +334,17 @@ fn check_codesign_identity() -> DoctorCheck {
             detail: "Developer ID Application identity found.".into(),
             fix: "-".into(),
         }
+    } else if identities.success()
+        && (identities.output.contains("Apple Development:")
+            || identities.output.contains("MacClean Local Development"))
+    {
+        DoctorCheck {
+            name: "Signing Identity",
+            status: CheckStatus::Warn,
+            detail: "Stable development signing identity found.".into(),
+            fix: "Local rebuilds keep their identity; Developer ID is still required for distribution."
+                .into(),
+        }
     } else {
         DoctorCheck {
             name: "Signing Identity",

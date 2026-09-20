@@ -69,6 +69,20 @@ The repository also includes a SwiftUI desktop app with Fast and Deep scans, str
 open dist/MacClean.app
 ```
 
+Development builds are ad-hoc signed unless a signing identity is available.
+Because an ad-hoc app's identity changes whenever its executable changes, macOS
+may request Full Disk Access again after each rebuild. Install the repository's
+trusted local development identity once, then rebuild and grant access once:
+
+```bash
+./scripts/setup-local-signing.sh
+./scripts/build-swiftui-app.sh
+```
+
+Set `MACCLEAN_SIGN_IDENTITY` to an Apple Development or Developer ID Application
+identity to override the local identity. The local certificate is for this Mac
+only and is not suitable for distributing the app to other users.
+
 Fast Scan sizes the selected folder's immediate children for a useful overview. Deep Scan explicitly traverses the requested depth. Both report incomplete coverage instead of presenting partial totals as complete.
 
 ---
