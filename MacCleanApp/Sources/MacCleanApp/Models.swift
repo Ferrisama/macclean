@@ -89,6 +89,8 @@ struct RecipeItem: Codable, Identifiable {
     let risk: String
     let reason: String
     let removable: Bool
+    let safety: StorageSafety
+    let appEligible: Bool
 }
 
 struct StorageScan: Codable {
@@ -100,7 +102,16 @@ struct StorageScan: Codable {
     let elapsedMs: UInt64
     let partial: Bool
     let incompleteReason: String?
+    let metrics: ScanMetrics?
     let tree: StorageNode
+}
+
+struct ScanMetrics: Codable {
+    let implementation: String
+    let entriesSeen: UInt64
+    let directoriesSeen: UInt64
+    let filesSeen: UInt64
+    let metadataErrors: UInt64
 }
 
 struct StorageNode: Codable, Identifiable {
@@ -161,10 +172,16 @@ extension AppScanItem {
         percentOfRoot = 0
         isDir = true
         partial = false
-        safety = recipe.safety
+        safety = recipeItem.safety
         cleanKind = recipeItem.kind
-        cleanupAction = "Move to Trash"
-        cleanupReason = recipeItem.reason
+        cleanupAction = recipeItem.appEligible ? "Move to Trash" : "Unavailable in app"
+        cleanupReason = recipeItem.appEligible
+            ? recipeItem.reason
+            : "\(recipeItem.reason) This path is not eligible for direct app cleanup; use its named cleaner from the CLI instead."
+    }
+
+    var canMoveToTrash: Bool {
+        cleanupAction == "Move to Trash"
     }
 }
 
@@ -216,6 +233,8 @@ struct HistorySession: Codable, Identifiable {
 
 struct AppTrashResponse: Codable {
     let dryRun: Bool
+    let sessionId: String?
+    let receiptError: String?
     let movedCount: Int
     let failedCount: Int
     let totalBytes: UInt64
@@ -226,6 +245,7 @@ struct AppTrashOutcome: Codable, Identifiable {
     var id: String { path }
     let path: String
     let moved: Bool
+    let trashPath: String?
     let error: String?
 }
 

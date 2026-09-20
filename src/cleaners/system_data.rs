@@ -118,7 +118,14 @@ fn print_tree_scan(scan: &storage::StorageScan) {
     for (i, child) in scan.tree.children.iter().enumerate() {
         render_tree(child, "", i + 1 == scan.tree.children.len());
     }
-    println!("  Scan time: {} ms", scan.elapsed_ms);
+    println!(
+        "  Scan time: {} ms · {} entries ({} dirs, {} files) · {} metadata errors",
+        scan.elapsed_ms,
+        scan.metrics.entries_seen,
+        scan.metrics.directories_seen,
+        scan.metrics.files_seen,
+        scan.metrics.metadata_errors
+    );
 }
 
 fn render_tree(entry: &StorageNode, prefix: &str, last: bool) {

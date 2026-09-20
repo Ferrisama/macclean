@@ -461,12 +461,18 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
 struct AppTrashItemOutcome {
     path: std::path::PathBuf,
     moved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trash_path: Option<std::path::PathBuf>,
     error: Option<String>,
 }
 
 #[derive(Serialize)]
 struct AppTrashResponse {
     dry_run: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    receipt_error: Option<String>,
     moved_count: usize,
     failed_count: usize,
     total_bytes: u64,
@@ -776,28 +782,46 @@ fn run_app_restore(session: Option<String>) -> Result<()> {
 
 fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
     let mut items = Vec::new();
+    let mut response_outcomes = Vec::new();
     for path in paths {
         if !path.exists() {
-            items.push(crate::core::CleanItem {
-                label: path.display().to_string(),
+            response_outcomes.push(AppTrashItemOutcome {
                 path,
-                size_bytes: 0,
-                removable: false,
-                kind: crate::core::CleanKind::Unknown,
-                risk: crate::core::RiskLevel::High,
-                reason: "Path does not exist.".into(),
+                moved: false,
+                trash_path: None,
+                error: Some("Path no longer exists; refresh the scan and try again.".into()),
             });
             continue;
         }
-        let resolved_path = crate::core::safety::resolve_existing_path(&path)
-            .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
-        crate::core::safety::validate_removal(&resolved_path)
-            .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
+        let resolved_path = match crate::core::safety::resolve_existing_path(&path) {
+            Ok(path) => path,
+            Err(error) => {
+                response_outcomes.push(AppTrashItemOutcome {
+                    path,
+                    moved: false,
+                    trash_path: None,
+                    error: Some(error),
+                });
+                continue;
+            }
+        };
+        if let Err(error) = crate::core::safety::validate_removal(&resolved_path) {
+            response_outcomes.push(AppTrashItemOutcome {
+                path: resolved_path,
+                moved: false,
+                trash_path: None,
+                error: Some(error),
+            });
+            continue;
+        }
         if !crate::core::storage::app_cleanup_allowed(&resolved_path) {
-            anyhow::bail!(
-                "Refusing app cleanup for unclassified or protected path: {}",
-                resolved_path.display()
-            );
+            response_outcomes.push(AppTrashItemOutcome {
+                path: resolved_path,
+                moved: false,
+                trash_path: None,
+                error: Some("Refusing app cleanup for an unclassified or protected path.".into()),
+            });
+            continue;
         }
         let size_bytes = if resolved_path.is_dir() {
             crate::core::fs::dir_size(&resolved_path)
@@ -820,30 +844,35 @@ fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
         .filter(|item| item.removable)
         .map(|item| item.size_bytes)
         .sum();
-    let outcomes = if dry_run {
-        items
-            .iter()
-            .filter(|item| item.removable)
-            .map(|item| (item.path.clone(), Ok(())))
-            .collect()
+    let (session_id, receipt_error, outcomes) = if dry_run {
+        (
+            None,
+            None,
+            items
+                .iter()
+                .filter(|item| item.removable)
+                .map(|item| crate::core::trash::TrashItemResult {
+                    path: item.path.clone(),
+                    moved: false,
+                    trash_path: None,
+                    error: None,
+                })
+                .collect(),
+        )
     } else {
-        crate::core::trash::trash_clean_items("app-review", &items)
+        let result = crate::core::trash::trash_clean_items_with_session("app-review", &items);
+        (
+            Some(result.session_id),
+            result.receipt_error,
+            result.outcomes,
+        )
     };
-    let response_outcomes: Vec<_> = outcomes
-        .into_iter()
-        .map(|(path, result)| match result {
-            Ok(()) => AppTrashItemOutcome {
-                path,
-                moved: !dry_run,
-                error: None,
-            },
-            Err(error) => AppTrashItemOutcome {
-                path,
-                moved: false,
-                error: Some(error),
-            },
-        })
-        .collect();
+    response_outcomes.extend(outcomes.into_iter().map(|outcome| AppTrashItemOutcome {
+        path: outcome.path,
+        moved: outcome.moved,
+        trash_path: outcome.trash_path,
+        error: outcome.error,
+    }));
     let moved_count = if dry_run {
         0
     } else {
@@ -852,13 +881,14 @@ fn run_app_trash(paths: Vec<std::path::PathBuf>, dry_run: bool) -> Result<()> {
             .filter(|outcome| outcome.moved)
             .count()
     };
-    let failed_count = if dry_run {
-        0
-    } else {
-        response_outcomes.len().saturating_sub(moved_count)
-    };
+    let failed_count = response_outcomes
+        .iter()
+        .filter(|outcome| outcome.error.is_some())
+        .count();
     let response = AppTrashResponse {
         dry_run,
+        session_id,
+        receipt_error,
         moved_count,
         failed_count,
         total_bytes,

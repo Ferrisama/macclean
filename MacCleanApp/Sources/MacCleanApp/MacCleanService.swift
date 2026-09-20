@@ -24,10 +24,18 @@ final class CompletionGate: @unchecked Sendable {
 final class ProcessOutputBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
+    private let limit: Int?
+
+    init(limit: Int? = nil) {
+        self.limit = limit
+    }
 
     func append(_ newData: Data) {
         lock.lock()
         data.append(newData)
+        if let limit, data.count > limit {
+            data.removeFirst(data.count - limit)
+        }
         lock.unlock()
     }
 
@@ -41,6 +49,52 @@ final class ProcessOutputBuffer: @unchecked Sendable {
         lock.lock()
         data = newData
         lock.unlock()
+    }
+
+    func appendAndTakeLines(_ newData: Data, finish: Bool = false) -> [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        data.append(newData)
+        var lines: [Data] = []
+        while let newline = data.firstIndex(of: 0x0A) {
+            lines.append(Data(data[..<newline]))
+            data.removeSubrange(...newline)
+        }
+        if finish, !data.isEmpty {
+            lines.append(data)
+            data.removeAll(keepingCapacity: false)
+        }
+        return lines
+    }
+}
+
+final class ProcessReference: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var cancelled = false
+
+    func attach(_ process: Process) -> Bool {
+        lock.lock()
+        self.process = process
+        let shouldCancel = cancelled
+        lock.unlock()
+        return shouldCancel
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let process = process
+        lock.unlock()
+        if process?.isRunning == true {
+            process?.terminate()
+        }
+    }
+
+    var wasCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
     }
 }
 
@@ -66,15 +120,25 @@ enum MacCleanServiceError: LocalizedError {
 
 final class MacCleanService {
     private let processLock = NSLock()
-    private var scanProcesses: [UUID: Process] = [:]
+    private var scanProcesses: [UUID: ProcessReference] = [:]
 
     func cancelScan(jobID: UUID) {
         processLock.lock()
         let process = scanProcesses[jobID]
         processLock.unlock()
-        if process?.isRunning == true {
-            process?.terminate()
-        }
+        process?.cancel()
+    }
+
+    private func registerScan(_ reference: ProcessReference, jobID: UUID) {
+        processLock.lock()
+        scanProcesses[jobID] = reference
+        processLock.unlock()
+    }
+
+    private func unregisterScan(jobID: UUID) {
+        processLock.lock()
+        scanProcesses.removeValue(forKey: jobID)
+        processLock.unlock()
     }
 
     func appScan(
@@ -241,8 +305,10 @@ final class MacCleanService {
         throw MacCleanServiceError.binaryNotFound
     }
 
-    private func run(executable: URL, arguments: [String]) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
+    func run(executable: URL, arguments: [String]) async throws -> Data {
+        let reference = ProcessReference()
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = executable
             process.arguments = arguments
@@ -253,19 +319,10 @@ final class MacCleanService {
             process.standardError = errorOutput
             let gate = CompletionGate()
             let outputBuffer = ProcessOutputBuffer()
-            let errorBuffer = ProcessOutputBuffer()
-            output.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if !data.isEmpty {
-                    outputBuffer.append(data)
-                }
-            }
-            errorOutput.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if !data.isEmpty {
-                    errorBuffer.append(data)
-                }
-            }
+            let errorBuffer = ProcessOutputBuffer(limit: 64 * 1024)
+            let readers = DispatchGroup()
+            readers.enter()
+            readers.enter()
 
             @Sendable func finish(_ result: Result<Data, Error>) {
                 guard gate.tryComplete() else { return }
@@ -278,32 +335,55 @@ final class MacCleanService {
             }
 
             process.terminationHandler = { process in
-                output.fileHandleForReading.readabilityHandler = nil
-                errorOutput.fileHandleForReading.readabilityHandler = nil
-                let data = outputBuffer.snapshot()
-                if process.terminationStatus == 0 {
-                    finish(.success(data))
-                } else {
-                    let text = String(data: errorBuffer.snapshot(), encoding: .utf8) ?? ""
-                    finish(.failure(MacCleanServiceError.failedStatus(process.terminationStatus, text)))
+                readers.notify(queue: .global(qos: .utility)) {
+                    if reference.wasCancelled {
+                        finish(.failure(CancellationError()))
+                    } else if process.terminationStatus == 0 {
+                        finish(.success(outputBuffer.snapshot()))
+                    } else {
+                        let text = String(data: errorBuffer.snapshot(), encoding: .utf8) ?? ""
+                        finish(.failure(MacCleanServiceError.failedStatus(process.terminationStatus, text)))
+                    }
                 }
             }
 
             do {
                 try process.run()
+                output.fileHandleForWriting.closeFile()
+                errorOutput.fileHandleForWriting.closeFile()
+                _ = reference.attach(process)
+                DispatchQueue.global(qos: .utility).async {
+                    outputBuffer.append(output.fileHandleForReading.readDataToEndOfFile())
+                    readers.leave()
+                }
+                DispatchQueue.global(qos: .utility).async {
+                    errorBuffer.append(errorOutput.fileHandleForReading.readDataToEndOfFile())
+                    readers.leave()
+                }
+                if reference.wasCancelled, process.isRunning {
+                    process.terminate()
+                }
             } catch {
+                readers.leave()
+                readers.leave()
                 finish(.failure(MacCleanServiceError.launchFailed(error.localizedDescription)))
             }
-        }
+            }
+        }, onCancel: {
+            reference.cancel()
+        })
     }
 
-    private func runStreaming(
+    func runStreaming(
         executable: URL,
         arguments: [String],
         jobID: UUID,
         onLine: @escaping @Sendable (String) -> Void
     ) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
+        let reference = ProcessReference()
+        registerScan(reference, jobID: jobID)
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = executable
             process.arguments = arguments
@@ -312,64 +392,84 @@ final class MacCleanService {
             process.standardOutput = output
             process.standardError = errorOutput
             let gate = CompletionGate()
-            let outputBuffer = ProcessOutputBuffer()
             let lineBuffer = ProcessOutputBuffer()
-            let errorBuffer = ProcessOutputBuffer()
-            output.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                guard !data.isEmpty else { return }
-                outputBuffer.append(data)
-                let combined = lineBuffer.snapshot() + data
-                let lines = combined.split(separator: 0x0A, omittingEmptySubsequences: true)
-                let remainder = combined.last == 0x0A ? Data() : Data(lines.last ?? Data())
-                lineBuffer.replace(with: remainder)
-                let complete = combined.last == 0x0A ? lines : lines.dropLast()
-                for line in complete {
-                    if let text = String(data: line, encoding: .utf8) {
-                        onLine(text)
-                    }
-                }
-            }
-            errorOutput.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if !data.isEmpty {
-                    errorBuffer.append(data)
-                }
-            }
+            let resultBuffer = ProcessOutputBuffer()
+            let errorBuffer = ProcessOutputBuffer(limit: 64 * 1024)
+            let readers = DispatchGroup()
+            readers.enter()
+            readers.enter()
             @Sendable func finish(_ result: Result<Data, Error>) {
                 guard gate.tryComplete() else { return }
                 continuation.resume(with: result)
             }
             process.terminationHandler = { process in
-                self.processLock.lock()
-                self.scanProcesses.removeValue(forKey: jobID)
-                self.processLock.unlock()
-                output.fileHandleForReading.readabilityHandler = nil
-                errorOutput.fileHandleForReading.readabilityHandler = nil
-                let data = outputBuffer.snapshot()
-                if process.terminationStatus == 0 {
-                    let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
-                    if let resultLine = lines.last,
-                       let resultData = String(data: resultLine, encoding: .utf8)?.data(using: .utf8),
-                       let object = try? JSONSerialization.jsonObject(with: resultData),
+                readers.notify(queue: .global(qos: .utility)) {
+                    self.unregisterScan(jobID: jobID)
+                    if reference.wasCancelled {
+                        finish(.failure(CancellationError()))
+                    } else if process.terminationStatus == 0 {
+                        let resultData = resultBuffer.snapshot()
+                        if let object = try? JSONSerialization.jsonObject(with: resultData),
                        let dict = object as? [String: Any],
                        dict["type"] as? String == "result",
                        let payload = dict["data"] {
-                        finish(.success((try? JSONSerialization.data(withJSONObject: payload)) ?? Data()))
+                            finish(.success((try? JSONSerialization.data(withJSONObject: payload)) ?? Data()))
+                        } else {
+                            finish(.failure(MacCleanServiceError.invalidOutput("Streaming scan did not return a result.")))
+                        }
                     } else {
-                        finish(.failure(MacCleanServiceError.invalidOutput("Streaming scan did not return a result.")))
+                        let text = String(data: errorBuffer.snapshot(), encoding: .utf8) ?? ""
+                        finish(.failure(MacCleanServiceError.failedStatus(process.terminationStatus, text)))
                     }
-                } else {
-                    let text = String(data: errorBuffer.snapshot(), encoding: .utf8) ?? ""
-                    finish(.failure(MacCleanServiceError.failedStatus(process.terminationStatus, text)))
                 }
             }
             do {
                 try process.run()
-                processLock.lock()
-                scanProcesses[jobID] = process
-                processLock.unlock()
-            } catch { finish(.failure(MacCleanServiceError.launchFailed(error.localizedDescription))) }
-        }
+                output.fileHandleForWriting.closeFile()
+                errorOutput.fileHandleForWriting.closeFile()
+                _ = reference.attach(process)
+                DispatchQueue.global(qos: .utility).async {
+                    while true {
+                        let data = output.fileHandleForReading.availableData
+                        if data.isEmpty { break }
+                        for line in lineBuffer.appendAndTakeLines(data) {
+                            guard !line.isEmpty else { continue }
+                            if let text = String(data: line, encoding: .utf8) {
+                                onLine(text)
+                            }
+                            if let object = try? JSONSerialization.jsonObject(with: line),
+                               let dictionary = object as? [String: Any],
+                               dictionary["type"] as? String == "result" {
+                                resultBuffer.replace(with: line)
+                            }
+                        }
+                    }
+                    for line in lineBuffer.appendAndTakeLines(Data(), finish: true) where !line.isEmpty {
+                        if let text = String(data: line, encoding: .utf8) { onLine(text) }
+                        if let object = try? JSONSerialization.jsonObject(with: line),
+                           let dictionary = object as? [String: Any],
+                           dictionary["type"] as? String == "result" {
+                            resultBuffer.replace(with: line)
+                        }
+                    }
+                    readers.leave()
+                }
+                DispatchQueue.global(qos: .utility).async {
+                    errorBuffer.append(errorOutput.fileHandleForReading.readDataToEndOfFile())
+                    readers.leave()
+                }
+                if reference.wasCancelled, process.isRunning {
+                    process.terminate()
+                }
+            } catch {
+                readers.leave()
+                readers.leave()
+                unregisterScan(jobID: jobID)
+                finish(.failure(MacCleanServiceError.launchFailed(error.localizedDescription)))
+            }
+            }
+        }, onCancel: {
+            reference.cancel()
+        })
     }
 }

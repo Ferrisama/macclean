@@ -15,6 +15,7 @@ struct MacCleanApp: App {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var scan: AppScan?
+    @Published var selectedTab: AppTab = .dashboard
     @Published var selectedItem: AppScanItem?
     @Published var path = FileManager.default.homeDirectoryForCurrentUser.path
     @Published var isScanning = false
@@ -24,6 +25,7 @@ final class AppModel: ObservableObject {
     @Published var selectedCleanupPaths = Set<String>()
     @Published var isCleaning = false
     @Published var cleanupMessage: String?
+    @Published var cleanupOutcomes: [AppTrashOutcome] = []
     @Published var history: [HistorySession] = []
     @Published var isLoadingHistory = false
     @Published var isRestoring = false
@@ -39,7 +41,6 @@ final class AppModel: ObservableObject {
     @Published var fullDiskAccessStatus: FullDiskAccessStatus = .checking
     @Published var accessCheckedLocations: [String] = []
     @Published var accessDeniedLocations: [String] = []
-    @Published var showAccessOnboarding = false
     @Published var installedApplications: [InstalledApplication] = []
     @Published var selectedInstalledApplication: InstalledApplication?
     @Published var isLoadingInstalledApplications = false
@@ -57,12 +58,15 @@ final class AppModel: ObservableObject {
     private var activeScanLimit = 0
 
     func loadStartupData() {
-        checkFullDiskAccess(showOnboardingIfNeeded: true)
+        // Access is informational until the user chooses to configure it from
+        // the Access screen. Development builds are re-signed frequently, so
+        // repeatedly presenting this guidance is noisy and not actionable.
+        checkFullDiskAccess()
         loadCachedScan()
         loadRecipes()
     }
 
-    func checkFullDiskAccess(showOnboardingIfNeeded: Bool = false) {
+    func checkFullDiskAccess() {
         fullDiskAccessStatus = .checking
         Task {
             let result = await Task.detached(priority: .utility) {
@@ -71,23 +75,12 @@ final class AppModel: ObservableObject {
             fullDiskAccessStatus = result.status
             accessCheckedLocations = result.checkedLocations
             accessDeniedLocations = result.deniedLocations
-            if showOnboardingIfNeeded,
-               result.status != .granted,
-               !UserDefaults.standard.bool(forKey: "fullDiskAccessOnboardingSeen") {
-                showAccessOnboarding = true
-            }
         }
     }
 
     func openFullDiskAccessSettings() {
-        UserDefaults.standard.set(true, forKey: "fullDiskAccessOnboardingSeen")
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") else { return }
         NSWorkspace.shared.open(url)
-    }
-
-    func dismissAccessOnboarding() {
-        UserDefaults.standard.set(true, forKey: "fullDiskAccessOnboardingSeen")
-        showAccessOnboarding = false
     }
 
     func loadInstalledApplications() {
@@ -146,6 +139,7 @@ final class AppModel: ObservableObject {
         Task {
             do {
                 if let cached = try await service.cachedScan() {
+                    guard !isScanning, scanJobID == nil else { return }
                     scan = cached
                     selectedItem = cached.largestItems.first
                 }
@@ -302,6 +296,7 @@ final class AppModel: ObservableObject {
                 elapsedMs: UInt64(scanElapsedSeconds * 1_000),
                 partial: true,
                 incompleteReason: "Live results are incomplete until the scan finishes.",
+                metrics: nil,
                 tree: root
             ),
             systemData: nil,
@@ -318,19 +313,32 @@ final class AppModel: ObservableObject {
             return
         }
         path = item.path
+        // Do not leave the old folder's map visible while the new scope is
+        // being measured; that made successful navigation look like a no-op.
+        scan = nil
+        selectedItem = nil
         refresh()
+    }
+
+    func openInMap(_ item: AppScanItem) {
+        selectedTab = .map
+        open(item)
     }
 
     func goUp() {
         let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
         if parent != path, !parent.isEmpty {
             path = parent
+            scan = nil
+            selectedItem = nil
             refresh()
         }
     }
 
     func navigate(to newPath: String) {
         path = newPath
+        scan = nil
+        selectedItem = nil
         refresh()
     }
 
@@ -373,6 +381,7 @@ final class AppModel: ObservableObject {
     }
 
     func toggleCleanup(_ item: AppScanItem) {
+        guard item.canMoveToTrash else { return }
         if selectedCleanupPaths.contains(item.path) {
             selectedCleanupPaths.remove(item.path)
         } else {
@@ -397,9 +406,10 @@ final class AppModel: ObservableObject {
     func selectRecipePaths(_ recipe: CleanupRecipe) {
         selectedRecipe = recipe
         selectedCleanupPaths = Set(recipe.items.filter { item in
-            item.removable && item.path != "/dev/null"
+            item.appEligible && item.path != "/dev/null"
         }.map(\.path))
         selectedItem = recipeCandidateItems().first
+        selectedTab = .clean
     }
 
     func cleanSelected() {
@@ -408,20 +418,67 @@ final class AppModel: ObservableObject {
         }
         isCleaning = true
         cleanupMessage = nil
+        cleanupOutcomes = []
         let paths = Array(selectedCleanupPaths)
         Task {
             do {
                 let response = try await service.trash(paths: paths)
-                cleanupMessage = "Moved \(response.movedCount) item(s) to Trash, \(response.failedCount) failed. \(formatBytes(response.totalBytes)) reviewed."
+                let failureDetail = response.outcomes
+                    .compactMap(\.error)
+                    .first
+                    .map { " \($0)" } ?? ""
+                let sessionDetail = response.sessionId.map { " Session: \($0)." } ?? ""
+                let receiptDetail = response.receiptError.map { " \($0)" } ?? ""
+                cleanupMessage = "Moved \(response.movedCount) item(s) to Trash, \(response.failedCount) failed. \(formatBytes(response.totalBytes)) reviewed.\(sessionDetail)\(failureDetail)\(receiptDetail)"
+                cleanupOutcomes = response.outcomes
                 selectedCleanupPaths.removeAll()
                 selectedRecipe = nil
                 loadHistory()
                 loadRecipes()
-                loadCachedScan()
+                // The cached scan describes the files before the Trash move.
+                // Scan again so successfully removed candidates disappear
+                // instead of looking as though cleanup did nothing.
+                refresh(fast: !activeScanIsDeep)
             } catch {
                 cleanupMessage = error.localizedDescription
             }
             isCleaning = false
+        }
+    }
+
+    func preflightCleanup(_ completion: @escaping (Bool) -> Void) {
+        guard !selectedCleanupPaths.isEmpty, !isCleaning else {
+            completion(false)
+            return
+        }
+        isCleaning = true
+        cleanupMessage = nil
+        cleanupOutcomes = []
+        let paths = Array(selectedCleanupPaths)
+        Task {
+            defer { isCleaning = false }
+            do {
+                let response = try await service.trash(paths: paths, dryRun: true)
+                let eligiblePaths = Set(response.outcomes
+                    .filter { $0.error == nil }
+                    .map(\.path))
+                selectedCleanupPaths.formIntersection(eligiblePaths)
+                let failures = response.outcomes.filter { $0.error != nil }
+                cleanupOutcomes = failures
+                if eligiblePaths.isEmpty {
+                    cleanupMessage = failures.first?.error ?? "No selected paths passed cleanup preflight."
+                    completion(false)
+                } else {
+                    let excluded = failures.count
+                    cleanupMessage = excluded == 0
+                        ? "Preflight passed for \(eligiblePaths.count) item(s)."
+                        : "Preflight excluded \(excluded) item(s). \(failures.first?.error ?? "")"
+                    completion(true)
+                }
+            } catch {
+                cleanupMessage = error.localizedDescription
+                completion(false)
+            }
         }
     }
 
@@ -462,12 +519,10 @@ final class AppModel: ObservableObject {
 
 struct RootView: View {
     @StateObject private var model = AppModel()
-    @State private var selection: AppTab = .dashboard
-    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationSplitView {
-            List(AppTab.allCases, selection: $selection) { tab in
+            List(AppTab.allCases, selection: $model.selectedTab) { tab in
                 Label(tab.title, systemImage: tab.icon)
                     .tag(tab)
             }
@@ -482,20 +537,11 @@ struct RootView: View {
         .task {
             model.loadStartupData()
         }
-        .onChange(of: scenePhase) { newPhase in
-            if newPhase == .active {
-                model.checkFullDiskAccess()
-            }
-        }
-        .sheet(isPresented: $model.showAccessOnboarding) {
-            FullDiskAccessOnboardingView(model: model)
-                .interactiveDismissDisabled()
-        }
     }
 
     @ViewBuilder
     private var content: some View {
-        switch selection {
+        switch model.selectedTab {
         case .dashboard:
             DashboardView(model: model)
         case .map:

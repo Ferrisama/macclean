@@ -38,19 +38,22 @@ pub fn create_from_paths(name: &str, paths: &[PathBuf]) -> Result<StoredPlan> {
 
     let mut items = Vec::new();
     for path in paths {
-        if !path.exists() {
-            bail!("Path does not exist: {}", path.display());
-        }
-        safety::validate_removal(path).map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
-        let is_dir = path.is_dir();
+        let resolved_path = safety::resolve_existing_path(path)
+            .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
+        safety::validate_removal(&resolved_path)
+            .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
+        let is_dir = resolved_path.is_dir();
         let size_bytes = if is_dir {
-            crate::core::fs::dir_size(path)
+            crate::core::fs::dir_size(&resolved_path)
         } else {
-            path.metadata().map(|m| m.len()).unwrap_or(0)
+            resolved_path.metadata().map(|m| m.len()).unwrap_or(0)
         };
         items.push(PlanItem {
-            label: path.display().to_string(),
-            path: path.clone(),
+            label: resolved_path.display().to_string(),
+            // A plan may be applied from a different working directory than
+            // the one in which it was created. Persisting the resolved path
+            // makes its target stable in that case.
+            path: resolved_path,
             size_bytes,
             is_dir,
             kind: CleanKind::Unknown,
@@ -72,19 +75,22 @@ pub fn create_from_clean_items(
     source: &str,
     clean_items: &[CleanItem],
 ) -> Result<StoredPlan> {
-    let items: Vec<_> = clean_items
-        .iter()
-        .filter(|item| item.removable)
-        .map(|item| PlanItem {
+    let mut items = Vec::new();
+    for item in clean_items.iter().filter(|item| item.removable) {
+        let resolved_path = safety::resolve_existing_path(&item.path)
+            .map_err(|e| anyhow::anyhow!("{}: {}", item.path.display(), e))?;
+        safety::validate_removal(&resolved_path)
+            .map_err(|e| anyhow::anyhow!("{}: {}", item.path.display(), e))?;
+        items.push(PlanItem {
             label: item.label.clone(),
-            path: item.path.clone(),
+            path: resolved_path.clone(),
             size_bytes: item.size_bytes,
-            is_dir: item.path.is_dir(),
+            is_dir: resolved_path.is_dir(),
             kind: item.kind,
             risk: item.risk,
             reason: item.reason.clone(),
-        })
-        .collect();
+        });
+    }
 
     if items.is_empty() {
         bail!("No removable items to save in plan.");
@@ -228,6 +234,7 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
     use std::path::Path;
+    use tempfile::tempdir;
 
     #[test]
     fn rejects_bad_names() {
@@ -252,5 +259,17 @@ mod tests {
             }],
         };
         assert!(validate_plan(&plan).is_err());
+    }
+
+    #[test]
+    fn created_plans_store_resolved_paths() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("removable.log");
+        fs::write(&target, "data").unwrap();
+
+        let plan = create_from_paths("resolved", std::slice::from_ref(&target)).unwrap();
+
+        assert!(plan.items[0].path.is_absolute());
+        assert_eq!(plan.items[0].path, fs::canonicalize(target).unwrap());
     }
 }

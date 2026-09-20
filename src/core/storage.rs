@@ -1,16 +1,18 @@
 use anyhow::{bail, Result};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::fs::Metadata;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 use crate::core::fs::dir_size;
 use crate::core::CleanKind;
+
+const FAST_SCAN_BUDGET: Duration = Duration::from_secs(8);
+type ScanProgressCallback<'a> = dyn Fn(&Path, u64, bool, usize, usize) + Sync + 'a;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -30,7 +32,21 @@ pub struct StorageScan {
     pub partial: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incomplete_reason: Option<String>,
+    #[serde(default)]
+    pub metrics: ScanMetrics,
     pub tree: StorageNode,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScanMetrics {
+    /// The scanner implementation used to produce this result. Keeping this in
+    /// the result lets benchmark captures distinguish old cached data from the
+    /// one-pass traversal.
+    pub implementation: String,
+    pub entries_seen: u64,
+    pub directories_seen: u64,
+    pub files_seen: u64,
+    pub metadata_errors: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,32 +127,34 @@ pub fn scan_tree_with_progress(
     depth: usize,
     limit: usize,
     mode: ScanMode,
-    progress: Option<&(dyn Fn(&Path, u64, bool, usize, usize) + Sync)>,
+    progress: Option<&ScanProgressCallback<'_>>,
 ) -> Result<StorageScan> {
     if !root.exists() {
         bail!("Path does not exist: {}", root.display());
     }
     let start = Instant::now();
-    if mode == ScanMode::Fast {
-        let mut tree = build_fast_tree(&root, depth, limit, progress)?;
-        set_child_percentages(&mut tree);
-        let partial = tree.partial;
-        return Ok(StorageScan {
-            root,
-            mode,
-            depth,
+    let (mut tree, metrics) = if mode == ScanMode::Fast {
+        let tree = build_fast_tree(
+            &root,
             limit,
-            scanned_at: now_secs(),
-            elapsed_ms: start.elapsed().as_millis(),
-            partial,
-            incomplete_reason: partial.then(|| {
-                "One or more paths could not be fully read or sized; totals may be incomplete."
-                    .into()
-            }),
+            progress,
+            Some(Instant::now() + FAST_SCAN_BUDGET),
+        )?;
+        (
             tree,
-        });
-    }
-    let mut tree = build_node(&root, depth, limit, None, None, progress, 0, 0)?;
+            ScanMetrics {
+                implementation: "bounded-overview".into(),
+                ..ScanMetrics::default()
+            },
+        )
+    } else {
+        let mut metrics = ScanMetrics {
+            implementation: "single-pass".into(),
+            ..ScanMetrics::default()
+        };
+        let tree = build_single_pass_tree(&root, depth, limit, progress, &mut metrics)?;
+        (tree, metrics)
+    };
     set_child_percentages(&mut tree);
     let partial = tree.partial;
     Ok(StorageScan {
@@ -150,6 +168,7 @@ pub fn scan_tree_with_progress(
         incomplete_reason: partial.then(|| {
             "One or more paths could not be fully read or sized; totals may be incomplete.".into()
         }),
+        metrics,
         tree,
     })
 }
@@ -217,9 +236,15 @@ pub fn write_system_data_cache(scan: &SystemDataScan) -> Result<PathBuf> {
 
 pub fn app_cleanup_allowed(path: &Path) -> bool {
     matches!(
-        classify_storage_path(path, path.is_dir()).safety,
+        app_cleanup_safety(path),
         StorageSafety::Safe | StorageSafety::Review
     )
+}
+
+/// The safety tier used by the app's direct Trash operation. Recipes use this
+/// exact classification so their selectable state matches execution.
+pub fn app_cleanup_safety(path: &Path) -> StorageSafety {
+    classify_storage_path(path, path.is_dir()).safety
 }
 
 fn cache_dir() -> Result<PathBuf> {
@@ -229,13 +254,157 @@ fn cache_dir() -> Result<PathBuf> {
     Ok(home.join("Library/Application Support/macclean/scans"))
 }
 
+/// Traverse a selected scope exactly once. Every child contributes its
+/// allocation to each ancestor as the walk unwinds; presentation depth only
+/// controls which already-measured nodes we retain in the returned tree.
+fn build_single_pass_tree(
+    root: &Path,
+    visible_depth: usize,
+    limit: usize,
+    progress: Option<&ScanProgressCallback<'_>>,
+    metrics: &mut ScanMetrics,
+) -> Result<StorageNode> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    metrics.entries_seen = metrics.entries_seen.saturating_add(1);
+    let metadata = match fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            metrics.metadata_errors = metrics.metadata_errors.saturating_add(1);
+            return Ok(classified_node(&root, 0, false, true));
+        }
+    };
+    if !metadata.file_type().is_dir() {
+        metrics.files_seen = metrics.files_seen.saturating_add(1);
+        return Ok(classified_node(
+            &root,
+            allocated_size(&metadata),
+            false,
+            false,
+        ));
+    }
+
+    metrics.directories_seen = metrics.directories_seen.saturating_add(1);
+    let mut root_node = classified_node(&root, 0, true, false);
+    let entries: Vec<_> = match fs::read_dir(&root) {
+        Ok(entries) => entries.collect(),
+        Err(_) => {
+            metrics.metadata_errors = metrics.metadata_errors.saturating_add(1);
+            root_node.partial = true;
+            return Ok(root_node);
+        }
+    };
+    let total = entries.len();
+    let mut retained_children = Vec::new();
+    for (index, entry) in entries.into_iter().enumerate() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                metrics.metadata_errors = metrics.metadata_errors.saturating_add(1);
+                root_node.partial = true;
+                continue;
+            }
+        };
+        let child = single_pass_node(
+            &entry.path(),
+            visible_depth.saturating_sub(1),
+            limit,
+            metrics,
+        )?;
+        root_node.size_bytes = root_node.size_bytes.saturating_add(child.size_bytes);
+        root_node.partial |= child.partial;
+        if let Some(progress) = progress {
+            progress(
+                &child.path,
+                child.size_bytes,
+                child.partial,
+                index + 1,
+                total,
+            );
+        }
+        if visible_depth > 0 && child.size_bytes > 0 {
+            retained_children.push(child);
+        }
+    }
+    retained_children.sort_by_key(|child| std::cmp::Reverse(child.size_bytes));
+    retained_children.truncate(limit);
+    root_node.children = retained_children;
+    Ok(root_node)
+}
+
+fn single_pass_node(
+    path: &Path,
+    visible_depth: usize,
+    limit: usize,
+    metrics: &mut ScanMetrics,
+) -> Result<StorageNode> {
+    metrics.entries_seen = metrics.entries_seen.saturating_add(1);
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            metrics.metadata_errors = metrics.metadata_errors.saturating_add(1);
+            return Ok(classified_node(path, 0, false, true));
+        }
+    };
+    let is_dir = metadata.file_type().is_dir();
+    if !is_dir {
+        metrics.files_seen = metrics.files_seen.saturating_add(1);
+        return Ok(classified_node(
+            path,
+            allocated_size(&metadata),
+            false,
+            false,
+        ));
+    }
+
+    metrics.directories_seen = metrics.directories_seen.saturating_add(1);
+    let mut node = classified_node(path, 0, true, false);
+    let read_dir = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => {
+            metrics.metadata_errors = metrics.metadata_errors.saturating_add(1);
+            node.partial = true;
+            return Ok(node);
+        }
+    };
+
+    let mut retained_children = Vec::new();
+    for entry in read_dir {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                metrics.metadata_errors = metrics.metadata_errors.saturating_add(1);
+                node.partial = true;
+                continue;
+            }
+        };
+        let child = single_pass_node(
+            &entry.path(),
+            visible_depth.saturating_sub(1),
+            limit,
+            metrics,
+        )?;
+        node.size_bytes = node.size_bytes.saturating_add(child.size_bytes);
+        node.partial |= child.partial;
+        if visible_depth > 0 && child.size_bytes > 0 {
+            retained_children.push(child);
+        }
+    }
+    retained_children.sort_by_key(|child| std::cmp::Reverse(child.size_bytes));
+    retained_children.truncate(limit);
+    node.children = retained_children;
+    Ok(node)
+}
+
+// Kept temporarily for system-data helpers that still use bounded sizing.
+// `scan_tree` no longer dispatches through this repeated-sizing path.
+#[allow(dead_code, clippy::too_many_arguments)]
 fn build_node(
     path: &Path,
     depth: usize,
     limit: usize,
     deadline: Option<Instant>,
     known_size: Option<u64>,
-    progress: Option<&(dyn Fn(&Path, u64, bool, usize, usize) + Sync)>,
+    progress: Option<&ScanProgressCallback<'_>>,
     completed: usize,
     total: usize,
 ) -> Result<StorageNode> {
@@ -343,13 +512,13 @@ fn build_node(
 
 fn build_fast_tree(
     root: &Path,
-    _depth: usize,
     limit: usize,
-    progress: Option<&(dyn Fn(&Path, u64, bool, usize, usize) + Sync)>,
+    progress: Option<&ScanProgressCallback<'_>>,
+    deadline: Option<Instant>,
 ) -> Result<StorageNode> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     if !root.is_dir() {
-        return build_node(&root, 0, limit, None, None, progress, 0, 0);
+        return build_node(&root, 0, limit, deadline, None, progress, 0, 0);
     }
 
     let mut root_node = classified_node(&root, 0, true, false);
@@ -364,16 +533,16 @@ fn build_fast_tree(
             Vec::new()
         });
 
-    let completed = std::sync::atomic::AtomicUsize::new(0);
     let total = child_paths.len();
     let mut children: Vec<_> = child_paths
-        .par_iter()
-        .filter_map(|child| {
+        .iter()
+        .enumerate()
+        .filter_map(|(index, child)| {
             let is_dir = child.is_dir();
-            let (size, partial) = bounded_path_size(child, None);
+            let child_deadline = per_child_deadline(deadline, total.saturating_sub(index));
+            let (size, partial) = bounded_path_size(child, child_deadline);
             if let Some(progress) = progress {
-                let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                progress(child, size, partial, done, total);
+                progress(child, size, partial, index + 1, total);
             }
             (size > 0).then(|| classified_node(child, size, is_dir, partial))
         })
@@ -414,6 +583,7 @@ pub(crate) fn classified_node(
     }
 }
 
+#[allow(dead_code)]
 fn per_child_deadline(deadline: Option<Instant>, remaining_children: usize) -> Option<Instant> {
     let deadline = deadline?;
     let now = Instant::now();
@@ -658,6 +828,11 @@ fn classify_storage_path(path: &Path, is_dir: bool) -> StorageClassification {
             "System-owned or security-sensitive location.",
         )
     } else if has_component_sequence(&components, &["library", "caches"])
+        || has_component_sequence(&components, &[".npm"])
+        || has_component_sequence(&components, &[".yarn", "cache"])
+        || has_component_sequence(&components, &[".yarn", "berry", "cache"])
+        || has_component_sequence(&components, &[".local", "share", "pnpm", "store"])
+        || has_component_sequence(&components, &["library", "pnpm", "store"])
         || has_component_sequence(&components, &[".cargo", "registry", "cache"])
         || has_component_sequence(&components, &[".cargo", "registry", "src"])
         || has_component_sequence(&components, &[".cargo", "git", "checkouts"])
@@ -926,6 +1101,60 @@ mod tests {
     }
 
     #[test]
+    fn single_pass_scan_conserves_bytes_and_reports_coverage() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("alpha/nested")).unwrap();
+        fs::create_dir(dir.path().join("beta")).unwrap();
+        fs::write(dir.path().join("alpha/one.bin"), vec![1u8; 128]).unwrap();
+        fs::write(dir.path().join("alpha/nested/two.bin"), vec![2u8; 256]).unwrap();
+        fs::write(dir.path().join("beta/three.bin"), vec![3u8; 512]).unwrap();
+
+        let scan = scan_tree(dir.path().to_path_buf(), 3, 10, ScanMode::Deep).unwrap();
+        let child_total = scan
+            .tree
+            .children
+            .iter()
+            .fold(0u64, |total, child| total.saturating_add(child.size_bytes));
+
+        assert_eq!(scan.metrics.implementation, "single-pass");
+        assert_eq!(scan.metrics.metadata_errors, 0);
+        assert_eq!(scan.metrics.directories_seen, 4);
+        assert_eq!(scan.metrics.files_seen, 3);
+        assert_eq!(scan.metrics.entries_seen, 7);
+        assert_eq!(scan.tree.size_bytes, child_total);
+        assert!(!scan.tree.partial);
+    }
+
+    #[test]
+    fn single_pass_scan_streams_each_root_child_before_completion() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("large/nested")).unwrap();
+        fs::write(dir.path().join("large/nested/file.bin"), vec![0u8; 512]).unwrap();
+        fs::write(dir.path().join("small.bin"), vec![0u8; 64]).unwrap();
+        let events = std::sync::Mutex::new(Vec::new());
+
+        let _ = scan_tree_with_progress(
+            dir.path().to_path_buf(),
+            1,
+            1,
+            ScanMode::Fast,
+            Some(&|path, _, _, scanned, estimated| {
+                events.lock().unwrap().push((
+                    path.file_name().unwrap().to_string_lossy().to_string(),
+                    scanned,
+                    estimated,
+                ));
+            }),
+        )
+        .unwrap();
+
+        let events = events.into_inner().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|(_, _, estimated)| *estimated == 2));
+        assert_eq!(events.last().unwrap().1, 2);
+    }
+
+    #[test]
     fn fast_scan_stays_top_level_while_deep_scan_expands_children() {
         let dir = tempdir().unwrap();
         let nested = dir.path().join("parent/child");
@@ -998,6 +1227,22 @@ mod tests {
             StorageSafety::Safe
         );
         assert!(app_cleanup_allowed(path));
+    }
+
+    #[test]
+    fn known_node_cache_roots_are_safe_but_corepack_is_not() {
+        for path in [
+            Path::new("/Users/example/.npm"),
+            Path::new("/Users/example/.yarn/cache"),
+            Path::new("/Users/example/.yarn/berry/cache"),
+            Path::new("/Users/example/.local/share/pnpm/store"),
+        ] {
+            assert_eq!(app_cleanup_safety(path), StorageSafety::Safe, "{path:?}");
+            assert!(app_cleanup_allowed(path), "{path:?}");
+        }
+        assert!(!app_cleanup_allowed(Path::new(
+            "/Users/example/.cache/node/corepack"
+        )));
     }
 
     #[test]

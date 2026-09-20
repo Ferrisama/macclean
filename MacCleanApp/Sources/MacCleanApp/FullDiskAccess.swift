@@ -62,11 +62,11 @@ enum FullDiskAccessChecker {
             }
         }
 
-        if readable > 0 {
-            return FullDiskAccessResult(status: .granted, checkedLocations: checked, deniedLocations: denied)
-        }
         if !denied.isEmpty {
             return FullDiskAccessResult(status: .denied, checkedLocations: checked, deniedLocations: denied)
+        }
+        if !checked.isEmpty, readable == checked.count {
+            return FullDiskAccessResult(status: .granted, checkedLocations: checked, deniedLocations: denied)
         }
         return FullDiskAccessResult(status: .unavailable, checkedLocations: checked, deniedLocations: denied)
     }

@@ -14,6 +14,11 @@ let package = Package(
         .executableTarget(
             name: "MacCleanApp",
             path: "Sources/MacCleanApp"
+        ),
+        .testTarget(
+            name: "MacCleanAppTests",
+            dependencies: ["MacCleanApp"],
+            path: "Tests/MacCleanAppTests"
         )
     ]
 )

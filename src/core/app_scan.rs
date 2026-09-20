@@ -75,6 +75,8 @@ pub struct RecipeItem {
     pub risk: RiskLevel,
     pub reason: String,
     pub removable: bool,
+    pub safety: StorageSafety,
+    pub app_eligible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -343,23 +345,29 @@ fn build_recipe(def: RecipeDef) -> CleanupRecipe {
         let Ok(result) = cleaner.analyze() else {
             continue;
         };
-        items.extend(result.items.into_iter().map(|item| RecipeItem {
-            label: item.label,
-            path: item.path,
-            size_bytes: item.size_bytes,
-            kind: item.kind,
-            risk: item.risk,
-            reason: item.reason,
-            removable: item.removable,
+        items.extend(result.items.into_iter().map(|item| {
+            let safety = storage::app_cleanup_safety(&item.path);
+            let app_eligible = item.removable && storage::app_cleanup_allowed(&item.path);
+            RecipeItem {
+                label: item.label,
+                path: item.path,
+                size_bytes: item.size_bytes,
+                kind: item.kind,
+                risk: item.risk,
+                reason: item.reason,
+                removable: item.removable,
+                safety,
+                app_eligible,
+            }
         }));
     }
 
     let total_bytes = items
         .iter()
-        .filter(|item| item.removable)
+        .filter(|item| item.app_eligible)
         .map(|item| item.size_bytes)
         .sum();
-    let item_count = items.iter().filter(|item| item.removable).count();
+    let item_count = items.iter().filter(|item| item.app_eligible).count();
     items.sort_by_key(|item| std::cmp::Reverse(item.size_bytes));
     items.truncate(RECIPE_ITEM_LIMIT);
     CleanupRecipe {

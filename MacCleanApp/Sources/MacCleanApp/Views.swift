@@ -37,7 +37,12 @@ struct DashboardView: View {
 
                 HStack(alignment: .top, spacing: 14) {
                     SafetySummaryCard(totals: scan.safetyTotals)
-                    LargestListCard(title: "Largest Items", items: scan.largestItems, selectedItem: $model.selectedItem)
+                    LargestListCard(
+                        title: "Largest Items",
+                        items: scan.largestItems,
+                        selectedItem: $model.selectedItem,
+                        onOpen: model.openInMap
+                    )
                 }
                 .padding(.top, 14)
 
@@ -172,10 +177,13 @@ struct CleanReviewView: View {
                     selectedTotal: model.selectedCleanupTotal(in: scan),
                     isCleaning: model.isCleaning,
                     message: model.cleanupMessage,
+                    outcomes: model.cleanupOutcomes,
                     onSelectSafe: { model.selectSafeCandidates(from: reviewItems) },
                     onClear: model.clearCleanupSelection,
                     onToggle: model.toggleCleanup,
-                    onClean: model.cleanSelected
+                    onPreflight: model.preflightCleanup,
+                    onClean: model.cleanSelected,
+                    onOpen: model.open
                 )
                 }
                     .padding(16)
@@ -200,10 +208,13 @@ struct CleanReviewView: View {
                     selectedTotal: model.selectedCleanupTotalForRecipeOnly(),
                     isCleaning: model.isCleaning,
                     message: model.cleanupMessage,
+                    outcomes: model.cleanupOutcomes,
                     onSelectSafe: { model.selectSafeCandidates(from: recipeItems) },
                     onClear: model.clearCleanupSelection,
                     onToggle: model.toggleCleanup,
-                    onClean: model.cleanSelected
+                    onPreflight: model.preflightCleanup,
+                    onClean: model.cleanSelected,
+                    onOpen: model.open
                 )
             }
             .padding(16)
@@ -236,10 +247,13 @@ struct DeveloperView: View {
                     selectedTotal: model.selectedCleanupTotal(in: scan),
                     isCleaning: model.isCleaning,
                     message: model.cleanupMessage,
+                    outcomes: model.cleanupOutcomes,
                     onSelectSafe: { model.selectSafeCandidates(in: scan) },
                     onClear: model.clearCleanupSelection,
                     onToggle: model.toggleCleanup,
-                    onClean: model.cleanSelected
+                    onPreflight: model.preflightCleanup,
+                    onClean: model.cleanSelected,
+                    onOpen: model.open
                 )
             }
             .padding(16)
@@ -329,50 +343,13 @@ struct FullDiskAccessView: View {
                     }
                 }
 
-                Text("After enabling MacClean in System Settings, return to the app. Permission is checked automatically when the app becomes active.")
+                Text("After enabling MacClean in System Settings, return here and choose Check Again.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
             .padding(24)
             .frame(maxWidth: 760, alignment: .leading)
         }
-    }
-}
-
-struct FullDiskAccessOnboardingView: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "externaldrive.badge.exclamationmark")
-                .font(.system(size: 58))
-                .foregroundStyle(.orange)
-            Text("Allow Full Disk Access")
-                .font(.largeTitle.bold())
-            Text("MacClean can run without this permission, but storage totals may be incomplete because macOS protects Mail, Messages, Safari, and app-container data.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: 500)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Open System Settings", systemImage: "1.circle.fill")
-                Label("Enable MacClean under Full Disk Access", systemImage: "2.circle.fill")
-                Label("Return here; MacClean checks again automatically", systemImage: "3.circle.fill")
-            }
-
-            HStack {
-                Button("Continue with limited access") {
-                    model.dismissAccessOnboarding()
-                }
-                Button("Open Full Disk Access") {
-                    model.openFullDiskAccessSettings()
-                    model.dismissAccessOnboarding()
-                }
-                .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(36)
-        .frame(width: 640, height: 470)
     }
 }
 
@@ -913,8 +890,8 @@ struct RecipeCard: View {
     let recipe: CleanupRecipe
     let onSelect: () -> Void
 
-    private var pathBackedCount: Int {
-        recipe.items.filter { $0.removable && $0.path != "/dev/null" }.count
+    private var appEligibleCount: Int {
+        recipe.items.filter { $0.appEligible && $0.path != "/dev/null" }.count
     }
 
     var body: some View {
@@ -935,7 +912,7 @@ struct RecipeCard: View {
                 .lineLimit(3)
             Spacer()
             HStack {
-                Text("\(recipe.itemCount) item(s)")
+                Text("\(appEligibleCount) ready item(s)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -944,8 +921,8 @@ struct RecipeCard: View {
                 } label: {
                     Label("Select", systemImage: "checkmark.circle")
                 }
-                .disabled(pathBackedCount == 0)
-                .help(pathBackedCount == 0 ? "This recipe uses a command-based cleaner and is not path-backed yet." : "Select recipe paths in Clean Review")
+                .disabled(appEligibleCount == 0)
+                .help(appEligibleCount == 0 ? "No items in this recipe are eligible for direct app cleanup." : "Select eligible recipe paths in Clean Review")
             }
         }
         .frame(width: 260, height: 150)
@@ -1058,10 +1035,13 @@ struct CandidateList: View {
     let selectedTotal: UInt64
     let isCleaning: Bool
     let message: String?
+    let outcomes: [AppTrashOutcome]
     let onSelectSafe: () -> Void
     let onClear: () -> Void
     let onToggle: (AppScanItem) -> Void
+    let onPreflight: (@escaping (Bool) -> Void) -> Void
     let onClean: () -> Void
+    var onOpen: ((AppScanItem) -> Void)? = nil
     @State private var confirmingClean = false
 
     var body: some View {
@@ -1084,7 +1064,11 @@ struct CandidateList: View {
                     Label("Clear", systemImage: "xmark.circle")
                 }
                 Button {
-                    confirmingClean = true
+                    onPreflight { passed in
+                        if passed {
+                            confirmingClean = true
+                        }
+                    }
                 } label: {
                     Label("Move to Trash", systemImage: "trash")
                 }
@@ -1107,6 +1091,39 @@ struct CandidateList: View {
                 Text(message)
                     .foregroundStyle(.secondary)
             }
+            if !outcomes.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(Array(outcomes.prefix(6))) { outcome in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Image(systemName: outcome.moved ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                                .foregroundStyle(outcome.moved ? .green : .red)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(outcome.path)
+                                    .font(.caption.monospaced())
+                                    .lineLimit(1)
+                                if let trashPath = outcome.trashPath {
+                                    Text("Trash: \(trashPath)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                if let error = outcome.error {
+                                    Text(error)
+                                        .font(.caption2)
+                                        .foregroundStyle(.red)
+                                }
+                            }
+                        }
+                    }
+                    if outcomes.count > 6 {
+                        Text("And \(outcomes.count - 6) more result(s) in History.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(8)
+                .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 6))
+            }
             if items.isEmpty {
                 EmptyPanelText("No cleanable candidates in this scan. Use Deep Scan or scan a developer/project folder.")
             } else {
@@ -1121,7 +1138,25 @@ struct CandidateList: View {
                             Image(systemName: selectedPaths.contains(item.path) ? "checkmark.square.fill" : "square")
                         }
                         .buttonStyle(.plain)
+                        .disabled(!item.canMoveToTrash)
+                        .help(item.canMoveToTrash ? "Include in cleanup" : "This item requires its dedicated CLI cleaner")
                         ItemRow(item: item)
+                        if item.isDir {
+                            Button {
+                                onOpen?(item)
+                            } label: {
+                                Image(systemName: "arrow.right.circle")
+                            }
+                            .buttonStyle(.plain)
+                            .help("Open folder in MacClean")
+                        }
+                        Button {
+                            revealInFinder(item.path)
+                        } label: {
+                            Image(systemName: "finder")
+                        }
+                        .buttonStyle(.plain)
+                        .help("Reveal in Finder")
                     }
                     .tag(item.id)
                 }
@@ -1264,7 +1299,10 @@ struct StorageTreemap: View {
                         let rects = treemapRects(items: items, in: CGRect(origin: .zero, size: size))
                         for entry in rects {
                             let isSelected = entry.item.id == selectedItem?.id
-                            let path = Path(entry.rect.insetBy(dx: 2, dy: 2))
+                            let visibleRect = entry.rect.width > 4 && entry.rect.height > 4
+                                ? entry.rect.insetBy(dx: 2, dy: 2)
+                                : entry.rect
+                            let path = Path(visibleRect)
                             context.fill(path, with: .color(entry.item.safety.color.opacity(isSelected ? 0.9 : 0.58)))
                             context.stroke(path, with: .color(isSelected ? .primary : .black.opacity(0.18)), lineWidth: isSelected ? 2 : 1)
 
@@ -1276,21 +1314,23 @@ struct StorageTreemap: View {
                             }
                         }
                     }
-                    .overlay {
-                        ForEach(Array(treemapRects(items: items, in: CGRect(origin: .zero, size: proxy.size)).enumerated()), id: \.offset) { _, entry in
-                            Rectangle()
-                                .fill(.clear)
-                                .contentShape(Rectangle())
-                                .frame(width: entry.rect.width, height: entry.rect.height)
-                                .position(x: entry.rect.midX, y: entry.rect.midY)
-                                .onTapGesture {
-                                    selectedItem = entry.item
+                    .contentShape(Rectangle())
+                    .gesture(
+                        SpatialTapGesture()
+                            .onEnded { value in
+                                let rects = treemapRects(
+                                    items: items,
+                                    in: CGRect(origin: .zero, size: proxy.size)
+                                )
+                                guard let entry = rects.first(where: { $0.rect.contains(value.location) }) else {
+                                    return
                                 }
-                                .onTapGesture(count: 2) {
+                                selectedItem = entry.item
+                                if entry.item.isDir {
                                     onOpen?(entry.item)
                                 }
-                        }
-                    }
+                            }
+                    )
                 }
             }
         }
@@ -1303,33 +1343,77 @@ struct TreemapEntry {
 }
 
 func treemapRects(items: [AppScanItem], in rect: CGRect) -> [TreemapEntry] {
-    let total = items.reduce(UInt64(0)) { $0 + $1.sizeBytes }
+    guard rect.width > 0, rect.height > 0 else { return [] }
+    let sortedItems = items
+        .filter { $0.sizeBytes > 0 }
+        .sorted { $0.sizeBytes > $1.sizeBytes }
+    let total = sortedItems.reduce(UInt64(0)) { $0 + $1.sizeBytes }
     guard total > 0 else { return [] }
-    var result: [TreemapEntry] = []
-    var cursor = rect.origin
-    var remainingWidth = rect.width
-    var remainingHeight = rect.height
-    var horizontal = rect.width >= rect.height
 
-    for (index, item) in items.enumerated() {
-        let isLast = index == items.count - 1
-        let fraction = CGFloat(Double(item.sizeBytes) / Double(total))
-        let itemRect: CGRect
-        if horizontal {
-            let width = isLast ? remainingWidth : max(12, rect.width * fraction)
-            itemRect = CGRect(x: cursor.x, y: cursor.y, width: min(width, remainingWidth), height: remainingHeight)
-            cursor.x += itemRect.width
-            remainingWidth -= itemRect.width
+    let scale = rect.width * rect.height / CGFloat(total)
+    let weightedItems = sortedItems.map { ($0, CGFloat($0.sizeBytes) * scale) }
+    var result: [TreemapEntry] = []
+    var remaining = rect
+    var row: [(AppScanItem, CGFloat)] = []
+    var index = 0
+
+    while index < weightedItems.count {
+        let candidate = weightedItems[index]
+        let side = min(remaining.width, remaining.height)
+        if row.isEmpty || worstAspect(row + [candidate], side: side) <= worstAspect(row, side: side) {
+            row.append(candidate)
+            index += 1
         } else {
-            let height = isLast ? remainingHeight : max(12, rect.height * fraction)
-            itemRect = CGRect(x: cursor.x, y: cursor.y, width: remainingWidth, height: min(height, remainingHeight))
-            cursor.y += itemRect.height
-            remainingHeight -= itemRect.height
+            remaining = layoutTreemapRow(row, in: remaining, result: &result)
+            row.removeAll(keepingCapacity: true)
         }
-        result.append(TreemapEntry(item: item, rect: itemRect))
-        horizontal.toggle()
+    }
+    if !row.isEmpty {
+        _ = layoutTreemapRow(row, in: remaining, result: &result)
     }
     return result
+}
+
+private func worstAspect(_ row: [(AppScanItem, CGFloat)], side: CGFloat) -> CGFloat {
+    guard !row.isEmpty, side > 0 else { return .infinity }
+    let sum = row.reduce(CGFloat.zero) { $0 + $1.1 }
+    guard sum > 0, let smallest = row.map(\.1).min(), let largest = row.map(\.1).max(), smallest > 0 else {
+        return .infinity
+    }
+    let sideSquared = side * side
+    return max(sideSquared * largest / (sum * sum), (sum * sum) / (sideSquared * smallest))
+}
+
+/// Places one squarified row, returning the unoccupied part of the parent.
+/// No artificial minimum dimensions are introduced: each tile's area stays
+/// proportional to its measured bytes.
+@discardableResult
+private func layoutTreemapRow(
+    _ row: [(AppScanItem, CGFloat)],
+    in rect: CGRect,
+    result: inout [TreemapEntry]
+) -> CGRect {
+    let area = row.reduce(CGFloat.zero) { $0 + $1.1 }
+    guard area > 0 else { return rect }
+    if rect.width >= rect.height {
+        let rowHeight = area / rect.width
+        var x = rect.minX
+        for (offset, entry) in row.enumerated() {
+            let width = offset == row.count - 1 ? rect.maxX - x : entry.1 / rowHeight
+            result.append(TreemapEntry(item: entry.0, rect: CGRect(x: x, y: rect.minY, width: width, height: rowHeight)))
+            x += width
+        }
+        return CGRect(x: rect.minX, y: rect.minY + rowHeight, width: rect.width, height: max(0, rect.height - rowHeight))
+    }
+
+    let rowWidth = area / rect.height
+    var y = rect.minY
+    for (offset, entry) in row.enumerated() {
+        let height = offset == row.count - 1 ? rect.maxY - y : entry.1 / rowWidth
+        result.append(TreemapEntry(item: entry.0, rect: CGRect(x: rect.minX, y: y, width: rowWidth, height: height)))
+        y += height
+    }
+    return CGRect(x: rect.minX + rowWidth, y: rect.minY, width: max(0, rect.width - rowWidth), height: rect.height)
 }
 
 struct SafetyLegend: View {

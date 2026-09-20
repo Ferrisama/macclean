@@ -11,28 +11,83 @@ use crate::core::{history, safety, CleanItem};
 pub fn trash_paths(paths: &[PathBuf]) -> Vec<(PathBuf, Result<(), String>)> {
     paths
         .iter()
-        .filter(|p| p.exists())
-        .map(|p| (p.clone(), trash_one(p).map(|_| ())))
+        .map(|p| {
+            let result = if p.exists() {
+                trash_one(p).map(|_| ())
+            } else {
+                Err(format!("path no longer exists: {}", p.display()))
+            };
+            (p.clone(), result)
+        })
         .collect()
 }
 
 pub fn trash_clean_items(cleaner: &str, items: &[CleanItem]) -> Vec<(PathBuf, Result<(), String>)> {
+    trash_clean_items_with_session(cleaner, items)
+        .outcomes
+        .into_iter()
+        .map(|outcome| {
+            let result = match outcome.error {
+                Some(error) => Err(error),
+                None if outcome.moved => Ok(()),
+                None => Err("item was not moved to Trash".into()),
+            };
+            (outcome.path, result)
+        })
+        .collect()
+}
+
+pub struct TrashCleanResult {
+    pub session_id: String,
+    pub outcomes: Vec<TrashItemResult>,
+    pub receipt_error: Option<String>,
+}
+
+pub struct TrashItemResult {
+    pub path: PathBuf,
+    pub moved: bool,
+    pub trash_path: Option<PathBuf>,
+    pub error: Option<String>,
+}
+
+/// Performs a Trash-backed cleanup and returns the durable session identifier
+/// used for its receipt and History records.
+pub fn trash_clean_items_with_session(cleaner: &str, items: &[CleanItem]) -> TrashCleanResult {
     let session_id = history::new_session_id(cleaner);
     let mut outcomes = Vec::new();
     let mut receipt_items = Vec::new();
 
-    items
-        .iter()
-        .filter(|item| item.removable && item.path.exists())
-        .for_each(|item| {
-            let path = item.path.clone();
-            if let Err(e) = safety::validate_removal(&path) {
-                receipt_items.push(receipt_item(item, "trash", "failed", Some(&e), None));
-                outcomes.push((path, Err(e)));
-                return;
+    for item in items {
+        let path = item.path.clone();
+        let preflight_error = if !item.removable {
+            Some("item is not marked removable".to_string())
+        } else if !path.exists() {
+            Some(format!("path no longer exists: {}", path.display()))
+        } else {
+            safety::validate_removal(&path).err()
+        };
+        if let Some(error) = preflight_error {
+            receipt_items.push(receipt_item(item, "trash", "failed", Some(&error), None));
+            outcomes.push(TrashItemResult {
+                path,
+                moved: false,
+                trash_path: None,
+                error: Some(error),
+            });
+            continue;
+        }
+
+        match trash_one(&path) {
+            Err(error) => {
+                receipt_items.push(receipt_item(item, "trash", "failed", Some(&error), None));
+                outcomes.push(TrashItemResult {
+                    path,
+                    moved: false,
+                    trash_path: None,
+                    error: Some(error),
+                });
             }
-            let result = trash_one(&path);
-            if let Ok(trash_path) = &result {
+            Ok(trash_path) => {
                 let record = history::HistoryRecord::new(
                     &session_id,
                     cleaner,
@@ -42,37 +97,44 @@ pub fn trash_clean_items(cleaner: &str, items: &[CleanItem]) -> Vec<(PathBuf, Re
                     item.size_bytes,
                     "trash",
                 );
-                if let Err(e) = history::append(&record) {
-                    let err = format!("moved to Trash but failed to record history: {}", e);
-                    receipt_items.push(receipt_item(
-                        item,
-                        "trash",
-                        "history_failed",
-                        Some(&err),
-                        trash_path.as_deref(),
-                    ));
-                    outcomes.push((path, Err(err)));
-                    return;
-                }
-            }
-            match &result {
-                Ok(trash_path) => receipt_items.push(receipt_item(
+                let history_error = history::append(&record)
+                    .err()
+                    .map(|error| format!("moved to Trash but failed to record history: {}", error));
+                let status = if history_error.is_some() {
+                    "history_failed"
+                } else {
+                    "moved"
+                };
+                receipt_items.push(receipt_item(
                     item,
                     "trash",
-                    "moved",
-                    None,
+                    status,
+                    history_error.as_deref(),
                     trash_path.as_deref(),
-                )),
-                Err(e) => receipt_items.push(receipt_item(item, "trash", "failed", Some(e), None)),
+                ));
+                outcomes.push(TrashItemResult {
+                    path,
+                    moved: true,
+                    trash_path,
+                    error: history_error,
+                });
             }
-            outcomes.push((path, result.map(|_| ())));
-        });
-
-    if !receipt_items.is_empty() {
-        let _ = history::write_receipt(&session_id, cleaner, "trash", receipt_items);
+        }
     }
 
-    outcomes
+    let receipt_error = if receipt_items.is_empty() {
+        None
+    } else {
+        history::write_receipt(&session_id, cleaner, "trash", receipt_items)
+            .err()
+            .map(|error| format!("failed to write cleanup receipt: {}", error))
+    };
+
+    TrashCleanResult {
+        session_id,
+        outcomes,
+        receipt_error,
+    }
 }
 
 #[cfg(target_os = "macos")]
