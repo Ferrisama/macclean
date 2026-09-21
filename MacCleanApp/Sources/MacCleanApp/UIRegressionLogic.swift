@@ -77,6 +77,76 @@ enum NavigationDecision: Equatable {
     case stay
 }
 
+struct DirectoryNavigation: Equatable {
+    private(set) var rootPath: String
+    private(set) var currentPath: String
+    private(set) var backStack: [String] = []
+    private(set) var forwardStack: [String] = []
+
+    init(rootPath: String) {
+        let path = Self.normalized(rootPath)
+        self.rootPath = path
+        currentPath = path
+    }
+
+    var canGoBack: Bool { !backStack.isEmpty }
+    var canGoForward: Bool { !forwardStack.isEmpty }
+    var canGoUp: Bool { NavigationRules.parent(of: currentPath) != .stay }
+    var isAtRoot: Bool { currentPath == rootPath }
+
+    mutating func reset(rootPath: String) {
+        let path = Self.normalized(rootPath)
+        self.rootPath = path
+        currentPath = path
+        backStack.removeAll()
+        forwardStack.removeAll()
+    }
+
+    @discardableResult
+    mutating func open(_ path: String) -> String? {
+        let target = Self.normalized(path)
+        guard !target.isEmpty, target != currentPath else { return nil }
+        backStack.append(currentPath)
+        currentPath = target
+        forwardStack.removeAll()
+        return target
+    }
+
+    @discardableResult
+    mutating func goBack() -> String? {
+        guard let target = backStack.popLast() else { return nil }
+        forwardStack.append(currentPath)
+        currentPath = target
+        return target
+    }
+
+    @discardableResult
+    mutating func goForward() -> String? {
+        guard let target = forwardStack.popLast() else { return nil }
+        backStack.append(currentPath)
+        currentPath = target
+        return target
+    }
+
+    @discardableResult
+    mutating func goUp() -> String? {
+        guard case .scanDirectory(let parent) = NavigationRules.parent(of: currentPath) else {
+            return nil
+        }
+        return open(parent)
+    }
+
+    @discardableResult
+    mutating func goToRoot() -> String? {
+        open(rootPath)
+    }
+
+    private static func normalized(_ path: String) -> String {
+        guard !path.isEmpty else { return path }
+        return URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+}
+
 enum NavigationRules {
     static func opening(path: String, isDirectory: Bool) -> NavigationDecision {
         isDirectory ? .scanDirectory(path: path) : .selectFile(path: path)

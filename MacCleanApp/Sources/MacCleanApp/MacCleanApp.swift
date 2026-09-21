@@ -6,18 +6,23 @@ struct MacCleanApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
-                .frame(minWidth: 1100, minHeight: 720)
+                .frame(minWidth: 920, minHeight: 650)
         }
-        .windowStyle(.titleBar)
+        .windowStyle(.hiddenTitleBar)
     }
 }
 
 @MainActor
 final class AppModel: ObservableObject {
+    private static let initialPath = FileManager.default.homeDirectoryForCurrentUser.path
+
     @Published var scan: AppScan?
     @Published var selectedTab: AppTab = .dashboard
     @Published var selectedItem: AppScanItem?
-    @Published var path = FileManager.default.homeDirectoryForCurrentUser.path
+    @Published var path = AppModel.initialPath
+    @Published private(set) var directoryNavigation = DirectoryNavigation(
+        rootPath: AppModel.initialPath
+    )
     @Published var isScanning = false
     @Published var errorMessage: String?
     @Published var includeSystemData = false
@@ -108,7 +113,7 @@ final class AppModel: ObservableObject {
         panel.directoryURL = URL(fileURLWithPath: path, isDirectory: true)
         guard panel.runModal() == .OK, let selectedURL = panel.url else { return }
         path = selectedURL.standardizedFileURL.path
-        refresh()
+        startRootScan()
     }
 
     func revealCurrentPath() {
@@ -176,6 +181,8 @@ final class AppModel: ObservableObject {
                           !isScanning,
                           scanOwnership.activeJobID == nil else { return }
                     scan = cached
+                    path = cached.rootScan.root
+                    directoryNavigation.reset(rootPath: cached.rootScan.root)
                     selectedItem = cached.largestItems.first
                 }
             } catch {
@@ -202,7 +209,23 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func refresh(fast: Bool = true) {
+    func startRootScan(fast: Bool = true) {
+        var isDirectory: ObjCBool = false
+        let requestedRoot = URL(fileURLWithPath: path).standardizedFileURL.path
+        guard FileManager.default.fileExists(atPath: requestedRoot, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            errorMessage = "Choose an existing folder before scanning."
+            return
+        }
+        path = requestedRoot
+        directoryNavigation.reset(rootPath: requestedRoot)
+        refresh(fast: fast)
+    }
+
+    func refresh(
+        fast: Bool = true,
+        rollbackNavigation: DirectoryNavigation? = nil
+    ) {
         if let activeJobID = scanOwnership.activeJobID {
             service.cancelScan(jobID: activeJobID)
             scanTask?.cancel()
@@ -256,6 +279,10 @@ final class AppModel: ObservableObject {
                 scanProgress = 1.0
             } catch {
                 if scanOwnership.accepts(ticket), !Task.isCancelled {
+                    if let rollbackNavigation {
+                        directoryNavigation = rollbackNavigation
+                        path = rollbackNavigation.currentPath
+                    }
                     errorMessage = error.localizedDescription
                     scanStage = "Failed"
                 }
@@ -610,9 +637,19 @@ final class AppModel: ObservableObject {
     }
 
     func goUp() {
-        if case .scanDirectory(let target) = NavigationRules.parent(of: path) {
-            beginNavigation(to: target)
-        }
+        transitionDirectory { $0.goUp() }
+    }
+
+    func goBack() {
+        transitionDirectory { $0.goBack() }
+    }
+
+    func goForward() {
+        transitionDirectory { $0.goForward() }
+    }
+
+    func goToScanRoot() {
+        transitionDirectory { $0.goToRoot() }
     }
 
     func navigate(to newPath: String) {
@@ -622,10 +659,18 @@ final class AppModel: ObservableObject {
     }
 
     private func beginNavigation(to target: String) {
+        transitionDirectory { $0.open(target) }
+    }
+
+    private func transitionDirectory(
+        _ transition: (inout DirectoryNavigation) -> String?
+    ) {
+        let previous = directoryNavigation
+        var next = directoryNavigation
+        guard let target = transition(&next) else { return }
+        directoryNavigation = next
         path = target
-        scan = nil
-        selectedItem = nil
-        refresh()
+        refresh(rollbackNavigation: previous)
     }
 
     func selectedCleanupTotal(in scan: AppScan) -> UInt64 {
@@ -822,15 +867,22 @@ struct RootView: View {
             List(AppTab.allCases, selection: $model.selectedTab) { tab in
                 Label(tab.title, systemImage: tab.icon)
                     .tag(tab)
+                    .padding(.vertical, 4)
             }
-            .navigationTitle("macclean")
+            .scrollContentBackground(.hidden)
+            .background(.ultraThinMaterial)
+            .navigationTitle("MacClean")
+            .navigationSplitViewColumnWidth(min: 168, ideal: 190, max: 230)
         } detail: {
-            VStack(spacing: 0) {
-                ToolbarView(model: model)
-                Divider()
-                content
+            ZStack {
+                AeroBackdrop()
+                VStack(spacing: 0) {
+                    ToolbarView(model: model)
+                    content
+                }
             }
         }
+        .tint(.cyan)
         .task {
             model.loadStartupData()
         }
@@ -913,7 +965,7 @@ struct ToolbarView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(minWidth: 420)
                     .onSubmit {
-                        model.refresh()
+                        model.startRootScan()
                     }
                     .accessibilityIdentifier("toolbar.path")
 
@@ -943,7 +995,7 @@ struct ToolbarView: View {
                 Toggle("Health", isOn: $model.includeHealth)
 
                 Button {
-                    model.refresh()
+                    model.startRootScan()
                 } label: {
                     Label("Fast Scan", systemImage: "bolt.fill")
                 }
@@ -952,7 +1004,7 @@ struct ToolbarView: View {
                 .accessibilityIdentifier("toolbar.fastScan")
 
                 Button {
-                    model.refresh(fast: false)
+                    model.startRootScan(fast: false)
                 } label: {
                     Label("Deep Scan", systemImage: "magnifyingglass")
                 }
@@ -1005,5 +1057,11 @@ struct ToolbarView: View {
             }
         }
         .padding(12)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(.white.opacity(0.1))
+                .frame(height: 1)
+        }
     }
 }

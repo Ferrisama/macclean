@@ -74,60 +74,131 @@ struct MapView: View {
 
     var body: some View {
         ScreenScaffold(model: model) { scan in
-            HSplitView {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Button {
-                            model.goUp()
-                        } label: {
-                            Image(systemName: "chevron.up")
-                        }
-                        .help("Go to parent folder")
-
-                        BreadcrumbBar(path: scan.rootScan.root, onNavigate: model.navigate)
-                        Spacer()
-                        Text(formatBytes(scan.rootScan.tree.sizeBytes))
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Picker("Sort", selection: $sortMode) {
-                            ForEach(MapSort.allCases) { mode in Text(mode.title).tag(mode) }
-                        }
-                        .pickerStyle(.segmented)
-                        Picker("Safety", selection: $safetyFilter) {
-                            Text("All").tag(StorageSafety?.none)
-                            ForEach(StorageSafety.allCases) { safety in Text(safety.label).tag(Optional(safety)) }
-                        }
-                        .frame(width: 260)
-                        Picker("Type", selection: $kindFilter) {
-                            Text("All types").tag(String?.none)
-                            ForEach(mapKinds(scan), id: \.self) { kind in
-                                Text(kind.capitalized).tag(Optional(kind))
-                            }
-                        }
-                        .frame(width: 180)
-                        Spacer()
-                    }
-                    StorageTreemap(items: visibleItems(scan), selectedItem: $model.selectedItem, onOpen: model.open)
-                        .frame(minWidth: 460, minHeight: 420)
-                    SafetyLegend()
-                }
-                .padding(16)
-
+            GeometryReader { proxy in
+                let items = visibleItems(scan)
                 VStack(spacing: 12) {
-                    LargestListCard(
-                        title: "Largest Items",
-                        items: visibleItems(scan),
-                        selectedItem: $model.selectedItem,
-                        onOpen: model.open
-                    )
-                    InspectorCard(item: inspectorItem(scan), onOpen: model.open)
+                    navigationBar(scan: scan)
+                    filterBar(scan: scan)
+
+                    if proxy.size.width >= 1_020 {
+                        HStack(alignment: .top, spacing: 14) {
+                            mapCanvas(items: items, minimumHeight: 340)
+                            MapDetailsPanel(
+                                items: items,
+                                selectedItem: $model.selectedItem,
+                                onOpen: model.open
+                            )
+                            .frame(width: min(360, proxy.size.width * 0.29))
+                        }
+                    } else {
+                        VStack(spacing: 12) {
+                            mapCanvas(items: items, minimumHeight: 240)
+                            MapCompactInspector(
+                                item: inspectorItem(scan),
+                                onOpen: model.open
+                            )
+                        }
+                    }
                 }
-                .padding(16)
-                .frame(minWidth: 380)
+                .padding(14)
             }
         }
+    }
+
+    private func navigationBar(scan: AppScan) -> some View {
+        HStack(spacing: 8) {
+            Button(action: model.goBack) {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(AeroIconButtonStyle())
+            .disabled(!model.directoryNavigation.canGoBack || model.isScanning)
+            .help("Back")
+            .accessibilityIdentifier("map.back")
+
+            Button(action: model.goForward) {
+                Image(systemName: "chevron.right")
+            }
+            .buttonStyle(AeroIconButtonStyle())
+            .disabled(!model.directoryNavigation.canGoForward || model.isScanning)
+            .help("Forward")
+            .accessibilityIdentifier("map.forward")
+
+            Button(action: model.goUp) {
+                Image(systemName: "arrow.up")
+            }
+            .buttonStyle(AeroIconButtonStyle())
+            .disabled(!model.directoryNavigation.canGoUp || model.isScanning)
+            .help("Parent folder")
+            .accessibilityIdentifier("map.parent")
+
+            Button(action: model.goToScanRoot) {
+                Image(systemName: "scope")
+            }
+            .buttonStyle(AeroIconButtonStyle())
+            .disabled(model.directoryNavigation.isAtRoot || model.isScanning)
+            .help("Return to scan root: \(model.directoryNavigation.rootPath)")
+            .accessibilityIdentifier("map.root")
+
+            BreadcrumbBar(path: model.path, onNavigate: model.navigate)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let error = model.errorMessage {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .help(error)
+                    .accessibilityLabel(error)
+            }
+
+            Text(formatBytes(scan.rootScan.tree.sizeBytes))
+                .font(.headline.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .aeroControlGroup()
+    }
+
+    private func filterBar(scan: AppScan) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                Picker("Sort", selection: $sortMode) {
+                    ForEach(MapSort.allCases) { mode in Text(mode.title).tag(mode) }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 225)
+
+                Picker("Safety", selection: $safetyFilter) {
+                    Text("All safety levels").tag(StorageSafety?.none)
+                    ForEach(StorageSafety.allCases) { safety in
+                        Text(safety.label).tag(Optional(safety))
+                    }
+                }
+                .frame(width: 210)
+
+                Picker("Type", selection: $kindFilter) {
+                    Text("All types").tag(String?.none)
+                    ForEach(mapKinds(scan), id: \.self) { kind in
+                        Text(kind.capitalized).tag(Optional(kind))
+                    }
+                }
+                .frame(width: 190)
+
+                SafetyLegend()
+            }
+        }
+        .aeroControlGroup()
+    }
+
+    private func mapCanvas(
+        items: [AppScanItem],
+        minimumHeight: CGFloat
+    ) -> some View {
+        StorageTreemap(
+            items: items,
+            selectedItem: $model.selectedItem,
+            onOpen: model.open
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(minHeight: minimumHeight)
+        .aeroPanel(cornerRadius: 24, padding: 8)
     }
 
     private func visibleItems(_ scan: AppScan) -> [AppScanItem] {
@@ -152,6 +223,144 @@ struct MapView: View {
             return selected
         }
         return items.first
+    }
+}
+
+struct MapDetailsPanel: View {
+    let items: [AppScanItem]
+    @Binding var selectedItem: AppScanItem?
+    let onOpen: (AppScanItem) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Largest items")
+                    .font(.headline)
+                Spacer()
+                Text("\(items.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    ForEach(items) { item in
+                        MapItemRow(
+                            item: item,
+                            isSelected: selectedItem?.id == item.id,
+                            onSelect: { selectedItem = item },
+                            onOpen: { onOpen(item) }
+                        )
+                    }
+                }
+            }
+
+            Divider().opacity(0.45)
+            MapInspectorContent(item: selectedItem ?? items.first, onOpen: onOpen)
+        }
+        .aeroPanel(cornerRadius: 24, padding: 14)
+    }
+}
+
+struct MapItemRow: View {
+    let item: AppScanItem
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onOpen: () -> Void
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Button(action: onSelect) {
+                HStack(spacing: 9) {
+                    Image(systemName: item.isDir ? "folder.fill" : "doc.fill")
+                        .foregroundStyle(item.safety.color)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.name)
+                            .lineLimit(1)
+                        Text(formatBytes(item.sizeBytes))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if item.isDir {
+                Button(action: onOpen) {
+                    Image(systemName: "arrow.right")
+                }
+                .buttonStyle(.plain)
+                .help("Open in map")
+            }
+            Button {
+                revealInFinder(item.path)
+            } label: {
+                Image(systemName: "finder")
+            }
+            .buttonStyle(.plain)
+            .help("Reveal in Finder")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            isSelected ? item.safety.color.opacity(0.16) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+        )
+    }
+}
+
+struct MapCompactInspector: View {
+    let item: AppScanItem?
+    let onOpen: (AppScanItem) -> Void
+
+    var body: some View {
+        MapInspectorContent(item: item, onOpen: onOpen)
+            .aeroPanel(cornerRadius: 18, padding: 12)
+    }
+}
+
+struct MapInspectorContent: View {
+    let item: AppScanItem?
+    let onOpen: (AppScanItem) -> Void
+
+    var body: some View {
+        if let item {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 9) {
+                    Image(systemName: item.isDir ? "folder.fill" : "doc.fill")
+                        .foregroundStyle(item.safety.color)
+                    Text(item.name)
+                        .font(.headline)
+                        .lineLimit(1)
+                    Spacer()
+                    Text(formatBytes(item.sizeBytes))
+                        .font(.headline.monospacedDigit())
+                }
+                Text(item.path)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .textSelection(.enabled)
+                Text(item.cleanupReason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                HStack {
+                    SafetyBadge(safety: item.safety)
+                    Spacer()
+                    if item.isDir {
+                        Button("Open") { onOpen(item) }
+                    }
+                    Button("Reveal") { revealInFinder(item.path) }
+                }
+            }
+        } else {
+            Text("Select a map tile to inspect it.")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
@@ -367,6 +576,7 @@ struct DuplicatesView: View {
                         }
                     }
                     .listStyle(.inset)
+                    .scrollContentBackground(.hidden)
                 }
             } else {
                 EmptyPanelText("Choose a folder in the toolbar, then find duplicates. No files will be selected or removed.")
@@ -1084,7 +1294,7 @@ struct MetricCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
-        .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+        .aeroSurface()
     }
 }
 
@@ -1125,7 +1335,7 @@ struct RecipeStrip: View {
             }
         }
         .padding(14)
-        .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+        .aeroSurface()
     }
 }
 
@@ -1171,7 +1381,7 @@ struct RecipeCard: View {
         }
         .frame(minWidth: 236, maxWidth: .infinity, minHeight: 150, maxHeight: 150)
         .padding(12)
-        .background(.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+        .aeroSurface(cornerRadius: 16)
     }
 }
 
@@ -1197,7 +1407,7 @@ struct GaugeCard: View {
                 .foregroundStyle(.secondary)
         }
         .padding(14)
-        .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+        .aeroSurface()
     }
 }
 
@@ -1222,7 +1432,7 @@ struct SafetySummaryCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+        .aeroSurface()
     }
 }
 
@@ -1278,7 +1488,7 @@ struct LargestListCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: 300)
-        .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+        .aeroSurface()
     }
 }
 
@@ -1502,7 +1712,7 @@ struct InspectorCard: View {
             }
         }
         .padding(14)
-        .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+        .aeroSurface()
     }
 }
 
@@ -1532,7 +1742,7 @@ struct SystemDataCard: View {
             }
         }
         .padding(14)
-        .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+        .aeroSurface()
     }
 }
 
@@ -1540,6 +1750,7 @@ struct StorageTreemap: View {
     let items: [AppScanItem]
     @Binding var selectedItem: AppScanItem?
     var onOpen: ((AppScanItem) -> Void)? = nil
+    @State private var hoveredItemID: String?
 
     var body: some View {
         GeometryReader { proxy in
@@ -1548,25 +1759,52 @@ struct StorageTreemap: View {
                 in: CGRect(origin: .zero, size: proxy.size)
             )
             ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(.quaternary.opacity(0.32))
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.black.opacity(0.08))
                 if items.isEmpty {
                     EmptyPanelText("No map data")
                 } else {
                     Canvas { context, size in
-                        for entry in rects {
+                        for (index, entry) in rects.enumerated() {
                             let isSelected = entry.item.id == selectedItem?.id
-                            let visibleRect = entry.rect.width > 4 && entry.rect.height > 4
-                                ? entry.rect.insetBy(dx: 2, dy: 2)
+                            let isHovered = entry.item.id == hoveredItemID
+                            let visibleRect = entry.rect.width > 7 && entry.rect.height > 7
+                                ? entry.rect.insetBy(dx: 3, dy: 3)
                                 : entry.rect
-                            let path = Path(visibleRect)
-                            context.fill(path, with: .color(entry.item.safety.color.opacity(isSelected ? 0.9 : 0.58)))
-                            context.stroke(path, with: .color(isSelected ? .primary : .black.opacity(0.18)), lineWidth: isSelected ? 2 : 1)
+                            let radius = min(
+                                AeroTheme.tileRadius,
+                                max(2, min(visibleRect.width, visibleRect.height) * 0.16)
+                            )
+                            let path = Path(roundedRect: visibleRect, cornerRadius: radius)
+                            let color = treemapTileColor(for: entry.item, index: index)
+                            var tileContext = context
+                            if isSelected || isHovered {
+                                tileContext.addFilter(.shadow(
+                                    color: color.opacity(0.55),
+                                    radius: isSelected ? 10 : 6
+                                ))
+                            }
+                            tileContext.fill(
+                                path,
+                                with: .linearGradient(
+                                    Gradient(colors: [
+                                        color.opacity(isSelected ? 0.96 : isHovered ? 0.88 : 0.74),
+                                        color.opacity(isSelected ? 0.72 : 0.48)
+                                    ]),
+                                    startPoint: CGPoint(x: visibleRect.minX, y: visibleRect.minY),
+                                    endPoint: CGPoint(x: visibleRect.maxX, y: visibleRect.maxY)
+                                )
+                            )
+                            tileContext.stroke(
+                                path,
+                                with: .color(.white.opacity(isSelected ? 0.82 : isHovered ? 0.5 : 0.2)),
+                                lineWidth: isSelected ? 2.5 : 1
+                            )
 
-                            if entry.rect.width > 90 && entry.rect.height > 42 {
-                                let text = Text(entry.item.name)
+                            if entry.rect.width > 105 && entry.rect.height > 55 {
+                                let text = Text("\(entry.item.name)\n\(formatBytes(entry.item.sizeBytes))")
                                     .font(.caption.bold())
-                                    .foregroundColor(.primary)
+                                    .foregroundColor(.white.opacity(0.94))
                                 context.draw(text, at: CGPoint(x: entry.rect.midX, y: entry.rect.midY))
                             }
                         }
@@ -1595,6 +1833,11 @@ struct StorageTreemap: View {
                             ? "Opens this folder in the storage map"
                             : "Selects this file for inspection")
                         .accessibilityIdentifier("map.tile.\(entry.item.path)")
+                        .onHover { hovering in
+                            withAnimation(.easeOut(duration: 0.16)) {
+                                hoveredItemID = hovering ? entry.item.id : nil
+                            }
+                        }
                         .contextMenu {
                             if entry.item.isDir {
                                 Button("Open in Map") {
@@ -1610,6 +1853,29 @@ struct StorageTreemap: View {
                 }
             }
         }
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .animation(.easeInOut(duration: 0.28), value: items.map(\.id))
+    }
+}
+
+private func treemapTileColor(for item: AppScanItem, index: Int) -> Color {
+    switch item.safety {
+    case .safe:
+        return Color(red: 0.16, green: 0.68, blue: 0.48)
+    case .review:
+        return Color(red: 0.96, green: 0.55, blue: 0.18)
+    case .userData:
+        return Color(red: 0.91, green: 0.32, blue: 0.4)
+    case .protected:
+        return Color(red: 0.62, green: 0.36, blue: 0.92)
+    case .unknown:
+        let palette: [Color] = [
+            Color(red: 0.22, green: 0.55, blue: 0.94),
+            Color(red: 0.18, green: 0.67, blue: 0.78),
+            Color(red: 0.35, green: 0.48, blue: 0.92),
+            Color(red: 0.2, green: 0.61, blue: 0.66)
+        ]
+        return palette[index % palette.count]
     }
 }
 

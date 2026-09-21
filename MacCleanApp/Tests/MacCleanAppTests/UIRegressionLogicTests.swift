@@ -139,6 +139,31 @@ final class UIRegressionLogicTests: XCTestCase {
         XCTAssertEqual(NavigationRules.navigating(to: ""), .stay)
     }
 
+    func testDirectoryNavigationSupportsBackForwardParentAndScanRoot() {
+        var navigation = DirectoryNavigation(rootPath: "/Users/test")
+
+        XCTAssertEqual(navigation.open("/Users/test/Documents"), "/Users/test/Documents")
+        XCTAssertEqual(navigation.open("/Users/test/Documents/Work"), "/Users/test/Documents/Work")
+        XCTAssertTrue(navigation.canGoBack)
+        XCTAssertEqual(navigation.goBack(), "/Users/test/Documents")
+        XCTAssertEqual(navigation.goForward(), "/Users/test/Documents/Work")
+        XCTAssertEqual(navigation.goUp(), "/Users/test/Documents")
+        XCTAssertEqual(navigation.goToRoot(), "/Users/test")
+        XCTAssertTrue(navigation.isAtRoot)
+    }
+
+    func testNewScanRootClearsDirectoryHistory() {
+        var navigation = DirectoryNavigation(rootPath: "/Users/test")
+        _ = navigation.open("/Users/test/Documents")
+
+        navigation.reset(rootPath: "/Volumes/External")
+
+        XCTAssertEqual(navigation.rootPath, "/Volumes/External")
+        XCTAssertEqual(navigation.currentPath, "/Volumes/External")
+        XCTAssertFalse(navigation.canGoBack)
+        XCTAssertFalse(navigation.canGoForward)
+    }
+
     private func scanItem(
         path: String,
         safety: StorageSafety,
