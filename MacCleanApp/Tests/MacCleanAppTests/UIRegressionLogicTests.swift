@@ -2,6 +2,33 @@ import XCTest
 @testable import MacCleanApp
 
 final class UIRegressionLogicTests: XCTestCase {
+    @MainActor
+    func testDashboardRecipeSelectionOpensCleanupReviewAndClearResetsIt() {
+        let model = AppModel()
+        let recipe = CleanupRecipe(
+            id: "cache",
+            title: "Cache",
+            subtitle: "",
+            safety: .safe,
+            totalBytes: 10,
+            itemCount: 1,
+            selectedByDefault: false,
+            command: "cache",
+            items: [recipeItem(path: "/eligible", removable: true, appEligible: true)]
+        )
+
+        model.selectRecipePaths(recipe)
+
+        XCTAssertEqual(model.selectedTab, .clean)
+        XCTAssertEqual(model.selectedCleanupPaths, ["/eligible"])
+        XCTAssertEqual(model.selectedRecipe?.id, "cache")
+
+        model.clearCleanupSelection()
+
+        XCTAssertTrue(model.selectedCleanupPaths.isEmpty)
+        XCTAssertNil(model.selectedRecipe)
+    }
+
     func testNewScanRejectsResultsFromPreviousGeneration() {
         var ownership = ScanGenerationOwnership()
         let first = ownership.begin(jobID: UUID())

@@ -97,6 +97,24 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    func chooseScanFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a folder to scan"
+        panel.prompt = "Choose"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.directoryURL = URL(fileURLWithPath: path, isDirectory: true)
+        guard panel.runModal() == .OK, let selectedURL = panel.url else { return }
+        path = selectedURL.standardizedFileURL.path
+        refresh()
+    }
+
+    func revealCurrentPath() {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
     func loadInstalledApplications() {
         guard !isLoadingInstalledApplications else { return }
         isLoadingInstalledApplications = true
@@ -894,6 +912,32 @@ struct ToolbarView: View {
                 TextField("Path", text: $model.path)
                     .textFieldStyle(.roundedBorder)
                     .frame(minWidth: 420)
+                    .onSubmit {
+                        model.refresh()
+                    }
+                    .accessibilityIdentifier("toolbar.path")
+
+                Button {
+                    model.chooseScanFolder()
+                } label: {
+                    Label("Choose Folder", systemImage: "folder")
+                }
+                .disabled(model.isScanning)
+                .accessibilityIdentifier("toolbar.chooseFolder")
+
+                Button {
+                    model.revealCurrentPath()
+                } label: {
+                    Image(systemName: "finder")
+                }
+                .help("Reveal the current path in Finder")
+                .accessibilityLabel("Reveal current path in Finder")
+                .accessibilityIdentifier("toolbar.revealPath")
+
+                Spacer()
+            }
+
+            HStack(spacing: 12) {
 
                 Toggle("System Data", isOn: $model.includeSystemData)
                 Toggle("Health", isOn: $model.includeHealth)
@@ -905,6 +949,7 @@ struct ToolbarView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(model.isScanning)
+                .accessibilityIdentifier("toolbar.fastScan")
 
                 Button {
                     model.refresh(fast: false)
@@ -912,6 +957,7 @@ struct ToolbarView: View {
                     Label("Deep Scan", systemImage: "magnifyingglass")
                 }
                 .disabled(model.isScanning)
+                .accessibilityIdentifier("toolbar.deepScan")
 
                 if model.isScanning {
                     Button {
@@ -924,7 +970,7 @@ struct ToolbarView: View {
                 Spacer()
             }
 
-            if model.fullDiskAccessStatus == .denied || model.fullDiskAccessStatus == .unavailable {
+            if model.fullDiskAccessStatus == .denied {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.shield")
                         .foregroundStyle(.orange)

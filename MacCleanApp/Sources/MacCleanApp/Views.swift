@@ -12,13 +12,13 @@ struct DashboardView: View {
                     MetricCard(
                         title: "Scanned",
                         value: formatBytes(scan.rootScan.tree.sizeBytes),
-                        subtitle: "\(scan.rootScan.elapsedMs) ms . \(scan.rootScan.partial ? "partial" : "complete")"
+                        subtitle: "\(scan.rootScan.elapsedMs) ms • \(scan.rootScan.partial ? "partial" : "complete")"
                     )
                     if let systemData = scan.systemData {
                         MetricCard(
                             title: "System Data",
                             value: formatBytes(systemData.totalBytes),
-                            subtitle: "\(systemData.elapsedMs) ms . \(systemData.partial ? "partial" : "complete")"
+                            subtitle: "\(systemData.elapsedMs) ms • \(systemData.partial ? "partial" : "complete")"
                         )
                     }
                     if let health = scan.health {
@@ -238,7 +238,9 @@ struct DuplicatesView: View {
                 } else {
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("\(model.selectedDuplicateCount) copy/copies selected")
+                            Text(model.selectedDuplicateCount == 1
+                                ? "1 copy selected"
+                                : "\(model.selectedDuplicateCount) copies selected")
                                 .font(.headline)
                             Text("\(formatBytes(model.selectedDuplicateBytes)) will move to Trash; one keeper per group is protected.")
                                 .font(.caption)
@@ -377,7 +379,9 @@ struct DuplicatesView: View {
             isPresented: $confirmingCleanup,
             titleVisibility: .visible
         ) {
-            Button("Move \(model.selectedDuplicateCount) Copy/Copies to Trash", role: .destructive) {
+            Button(model.selectedDuplicateCount == 1
+                ? "Move 1 Copy to Trash"
+                : "Move \(model.selectedDuplicateCount) Copies to Trash", role: .destructive) {
                 model.cleanSelectedDuplicates()
             }
             Button("Cancel", role: .cancel) {}
@@ -1107,12 +1111,14 @@ struct RecipeStrip: View {
                 EmptyPanelText(model.isLoadingRecipes ? "Finding cleanup recipes..." : "No recipe data yet.")
                     .frame(height: 120)
             } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        ForEach(model.recipes) { recipe in
-                            RecipeCard(recipe: recipe) {
-                                model.selectRecipePaths(recipe)
-                            }
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 260, maximum: 360), spacing: 12)],
+                    alignment: .leading,
+                    spacing: 12
+                ) {
+                    ForEach(model.recipes) { recipe in
+                        RecipeCard(recipe: recipe) {
+                            model.selectRecipePaths(recipe)
                         }
                     }
                 }
@@ -1160,9 +1166,10 @@ struct RecipeCard: View {
                 }
                 .disabled(appEligibleCount == 0)
                 .help(appEligibleCount == 0 ? "No items in this recipe are eligible for direct app cleanup." : "Select eligible recipe paths in Clean Review")
+                .accessibilityIdentifier("recipe.select.\(recipe.id)")
             }
         }
-        .frame(width: 260, height: 150)
+        .frame(minWidth: 236, maxWidth: .infinity, minHeight: 150, maxHeight: 150)
         .padding(12)
         .background(.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
     }
@@ -1246,7 +1253,17 @@ struct LargestListCard: View {
                             }
                             .buttonStyle(.plain)
                             .help("Open folder")
+                            .accessibilityIdentifier("items.open.\(item.path)")
                         }
+                        Button {
+                            revealInFinder(item.path)
+                        } label: {
+                            Image(systemName: "finder")
+                        }
+                        .buttonStyle(.plain)
+                        .help("Reveal in Finder")
+                        .accessibilityLabel("Reveal \(item.name) in Finder")
+                        .accessibilityIdentifier("items.reveal.\(item.path)")
                     }
                     .tag(item.id)
                     .onTapGesture(count: 2) {
@@ -1526,6 +1543,10 @@ struct StorageTreemap: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let rects = treemapRects(
+                items: items,
+                in: CGRect(origin: .zero, size: proxy.size)
+            )
             ZStack {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(.quaternary.opacity(0.32))
@@ -1533,7 +1554,6 @@ struct StorageTreemap: View {
                     EmptyPanelText("No map data")
                 } else {
                     Canvas { context, size in
-                        let rects = treemapRects(items: items, in: CGRect(origin: .zero, size: size))
                         for entry in rects {
                             let isSelected = entry.item.id == selectedItem?.id
                             let visibleRect = entry.rect.width > 4 && entry.rect.height > 4
@@ -1551,23 +1571,42 @@ struct StorageTreemap: View {
                             }
                         }
                     }
-                    .contentShape(Rectangle())
-                    .gesture(
-                        SpatialTapGesture()
-                            .onEnded { value in
-                                let rects = treemapRects(
-                                    items: items,
-                                    in: CGRect(origin: .zero, size: proxy.size)
-                                )
-                                guard let entry = rects.first(where: { $0.rect.contains(value.location) }) else {
-                                    return
-                                }
-                                selectedItem = entry.item
-                                if entry.item.isDir {
+
+                    ForEach(rects, id: \.item.id) { entry in
+                        Button {
+                            selectedItem = entry.item
+                            if entry.item.isDir {
+                                onOpen?(entry.item)
+                            }
+                        } label: {
+                            Rectangle()
+                                .fill(.clear)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .frame(width: max(1, entry.rect.width), height: max(1, entry.rect.height))
+                        .position(x: entry.rect.midX, y: entry.rect.midY)
+                        .help(entry.item.isDir
+                            ? "Open \(entry.item.name)"
+                            : "Select \(entry.item.name)")
+                        .accessibilityLabel(entry.item.name)
+                        .accessibilityValue(formatBytes(entry.item.sizeBytes))
+                        .accessibilityHint(entry.item.isDir
+                            ? "Opens this folder in the storage map"
+                            : "Selects this file for inspection")
+                        .accessibilityIdentifier("map.tile.\(entry.item.path)")
+                        .contextMenu {
+                            if entry.item.isDir {
+                                Button("Open in Map") {
+                                    selectedItem = entry.item
                                     onOpen?(entry.item)
                                 }
                             }
-                    )
+                            Button("Reveal in Finder") {
+                                revealInFinder(entry.item.path)
+                            }
+                        }
+                    }
                 }
             }
         }
