@@ -62,20 +62,38 @@ Analyzing, scanning, and building an uninstall plan all run in the background, s
 
 ## Native macOS app
 
-The repository also includes a SwiftUI desktop app with Fast and Deep scans,
-streamed Map results, content-verified read-only duplicate groups, cleanup
-review, History, Full Disk Access guidance, and recoverable uninstall. Build a
-self-contained bundle with:
+The repository also includes a native SwiftUI beta focused on trustworthy
+storage exploration and recoverable cleanup. It currently provides:
+
+- Fast and Deep scans with streamed progress, cancellation, cached startup,
+  partial-coverage reporting, and safety classification.
+- A responsive glass-style storage map with proportional rounded tiles,
+  hover/selection feedback, Finder actions, and compact/large-window layouts.
+- Reversible directory navigation with Back, Forward, Parent, scan-root,
+  clickable breadcrumb, and failed-navigation rollback controls.
+- Cleanup recipes and scan candidates that are reviewed before selected paths
+  move to Trash.
+- Content-verified duplicate groups with explicit keeper selection, immediate
+  content/identity revalidation, Trash receipts, History, and restore.
+- Exact recorded Trash destinations, per-path outcomes, collision-safe restore,
+  and warnings that distinguish moved bytes from reclaimed disk space.
+- Full Disk Access status and System Settings guidance without requesting access
+  during normal scans.
+- A searchable installed-app list and read-only standard/deep uninstall-plan
+  preview. Destructive uninstall execution remains a follow-up beta slice.
+
+Build a self-contained bundle with:
 
 ```bash
 ./scripts/build-swiftui-app.sh
 open dist/MacClean.app
 ```
 
-Development builds are ad-hoc signed unless a signing identity is available.
-Because an ad-hoc app's identity changes whenever its executable changes, macOS
-may request Full Disk Access again after each rebuild. Install the repository's
-trusted local development identity once, then rebuild and grant access once:
+Development builds use `MacClean Local Development` when that identity is
+installed; otherwise they fall back to ad-hoc signing. Because an ad-hoc app's
+identity changes whenever its executable changes, macOS may request Full Disk
+Access again after each rebuild. Install the repository's trusted local
+development identity once, then rebuild and grant access once:
 
 ```bash
 ./scripts/setup-local-signing.sh
@@ -87,6 +105,28 @@ identity to override the local identity. The local certificate is for this Mac
 only and is not suitable for distributing the app to other users.
 
 Fast Scan sizes the selected folder's immediate children for a useful overview. Deep Scan explicitly traverses the requested depth. Both report incomplete coverage instead of presenting partial totals as complete.
+
+### Beta verification
+
+```bash
+cargo fmt --check
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+(cd MacCleanApp && swift test)
+./scripts/smoke-swiftui-app.sh
+./scripts/verify-beta-upgrade.sh
+./scripts/benchmark-scanner.sh --runs 5 /path/to/same-scope-fixture
+```
+
+The packaged smoke test uses temporary fixtures to exercise scan, reviewed
+cleanup, duplicate keeper preservation, Trash receipts, History, and restore.
+The upgrade verifier rebuilds the signed app and checks that its designated
+requirement and isolated persisted state remain compatible.
+
+Current beta gaps are rendered SwiftUI automation across window sizes,
+post-result background deep refinement, destructive uninstall execution through
+the reviewed recovery pipeline, Intel/universal bundle testing, and public
+Developer ID signing/notarization.
 
 ---
 
