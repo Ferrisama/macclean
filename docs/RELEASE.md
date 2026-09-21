@@ -17,6 +17,20 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
+For a locally signed SwiftUI beta, also verify bundle metadata, stable identity
+across replacement builds, and compatibility with persisted scan and legacy
+History state:
+
+```bash
+scripts/verify-beta-upgrade.sh
+```
+
+The verifier uses an isolated temporary state directory and does not read or
+modify the user's MacClean state. Pass `--skip-initial-build` to treat the
+existing `dist/MacClean.app` as the first build and perform only the replacement
+build. A stable local signing identity from `scripts/setup-local-signing.sh` is
+required; ad-hoc signing intentionally fails this check.
+
 ## Build release artifacts
 
 Build for the current host target:

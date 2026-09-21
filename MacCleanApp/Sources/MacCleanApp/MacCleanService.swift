@@ -274,6 +274,55 @@ final class MacCleanService {
         let data: DuplicateScanProgress?
     }
 
+    func duplicateCleanup(
+        request: DuplicateCleanupRequest,
+        reviewTokens: [String: String] = [:],
+        dryRun: Bool
+    ) async throws -> DuplicateCleanupResponse {
+        struct BackendSelection: Encodable {
+            let path: String
+            let reviewToken: String?
+        }
+        struct BackendGroup: Encodable {
+            let id: String
+            let keeperPath: String
+            let files: [String]
+            let selected: [BackendSelection]
+        }
+        struct BackendRequest: Encodable {
+            let groups: [BackendGroup]
+        }
+
+        let backendRequest = BackendRequest(groups: request.groups.map { group in
+            BackendGroup(
+                id: group.groupID,
+                keeperPath: group.keeperPath,
+                files: group.reviewedMemberPaths,
+                selected: group.deletePaths.map {
+                    BackendSelection(path: $0, reviewToken: reviewTokens[$0])
+                }
+            )
+        })
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let requestData = try encoder.encode(backendRequest)
+        let requestURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macclean-duplicate-review-\(UUID().uuidString).json")
+        try requestData.write(to: requestURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: requestURL) }
+
+        let executable = try resolveBinary()
+        var arguments: [String] = []
+        if dryRun { arguments.append("--dry-run") }
+        arguments.append(contentsOf: [
+            "app-dupes-trash",
+            "--request-file",
+            requestURL.path
+        ])
+        let data = try await run(executable: executable, arguments: arguments)
+        return try JSONDecoder.macclean.decode(DuplicateCleanupResponse.self, from: data)
+    }
+
     func trash(
         paths: [String],
         reviewTokens: [String] = [],

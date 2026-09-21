@@ -53,6 +53,10 @@ final class AppModel: ObservableObject {
     @Published var duplicateError: String?
     @Published var duplicateMinMB: UInt64 = 10
     @Published var duplicateProgress: DuplicateScanProgress?
+    @Published var duplicateSelections: [String: DuplicateGroupSelection] = [:]
+    @Published var duplicateCleanupMessage: String?
+    @Published var isCleaningDuplicates = false
+    @Published var duplicateCleanupOutcomes: [DuplicateCleanupItemOutcome] = []
 
     private let service = MacCleanService()
     private var scanTask: Task<Void, Never>?
@@ -62,6 +66,7 @@ final class AppModel: ObservableObject {
     private var duplicateGeneration: UInt64 = 0
     private var duplicateJobID: UUID?
     private var cleanupReviewTokens: [String: String] = [:]
+    private var duplicateReviewTokens: [String: String] = [:]
     private var activeScanIsDeep = false
     private var activeScanDepth = 0
     private var activeScanLimit = 0
@@ -258,9 +263,14 @@ final class AppModel: ObservableObject {
         streamingItems = []
     }
 
-    func scanDuplicates() {
+    func scanDuplicates(preservingCleanupResults: Bool = false) {
         duplicateTask?.cancel()
         duplicateGeneration &+= 1
+        duplicateReviewTokens.removeAll()
+        duplicateSelections.removeAll()
+        if !preservingCleanupResults {
+            duplicateCleanupOutcomes.removeAll()
+        }
         let generation = duplicateGeneration
         isScanningDuplicates = true
         duplicateError = nil
@@ -293,6 +303,14 @@ final class AppModel: ObservableObject {
                 )
                 guard !Task.isCancelled, duplicateGeneration == generation else { return }
                 duplicateReport = report
+                duplicateSelections = report.groups.reduce(into: [:]) { selections, group in
+                    if let selection = try? DuplicateGroupSelection(
+                        group: group,
+                        strategy: .newest
+                    ) {
+                        selections[group.id] = selection
+                    }
+                }
             } catch is CancellationError {
                 // Cancellation is an expected user action.
             } catch {
@@ -311,6 +329,188 @@ final class AppModel: ObservableObject {
         duplicateTask?.cancel()
         duplicateTask = nil
         isScanningDuplicates = false
+    }
+
+    func setDuplicateStrategy(_ strategy: DuplicateKeepStrategy, for group: DuplicateGroup) {
+        duplicateReviewTokens.removeAll()
+        duplicateCleanupOutcomes.removeAll()
+        let manualKeeper = strategy == .manual
+            ? duplicateSelections[group.id]?.keeperPath
+            : nil
+        guard let selection = try? DuplicateGroupSelection(
+            group: group,
+            strategy: strategy,
+            manualKeeperPath: manualKeeper
+        ) else { return }
+        duplicateSelections[group.id] = selection
+        duplicateCleanupMessage = nil
+    }
+
+    func keepDuplicate(path: String, in group: DuplicateGroup) {
+        duplicateReviewTokens.removeAll()
+        duplicateCleanupOutcomes.removeAll()
+        guard let selection = try? DuplicateGroupSelection(
+            group: group,
+            strategy: .manual,
+            manualKeeperPath: path
+        ) else { return }
+        duplicateSelections[group.id] = selection
+        duplicateCleanupMessage = nil
+    }
+
+    func toggleDuplicateDeletion(path: String, in group: DuplicateGroup) {
+        duplicateReviewTokens.removeAll()
+        duplicateCleanupOutcomes.removeAll()
+        guard var selection = duplicateSelections[group.id],
+              selection.isCurrent(for: group) else { return }
+        _ = selection.toggleDeletion(path: path)
+        duplicateSelections[group.id] = selection
+        duplicateCleanupMessage = nil
+    }
+
+    func selectDuplicateCopies(in group: DuplicateGroup) {
+        duplicateReviewTokens.removeAll()
+        duplicateCleanupOutcomes.removeAll()
+        guard var selection = duplicateSelections[group.id],
+              selection.isCurrent(for: group) else { return }
+        selection.selectAllDeletable()
+        duplicateSelections[group.id] = selection
+        duplicateCleanupMessage = nil
+    }
+
+    func clearDuplicateCopies(in group: DuplicateGroup) {
+        duplicateReviewTokens.removeAll()
+        duplicateCleanupOutcomes.removeAll()
+        guard var selection = duplicateSelections[group.id] else { return }
+        selection.clearSelection()
+        duplicateSelections[group.id] = selection
+        duplicateCleanupMessage = nil
+    }
+
+    var selectedDuplicateCount: Int {
+        duplicateSelections.values.reduce(0) {
+            $0 + $1.selectedDeletionPaths.count
+        }
+    }
+
+    var selectedDuplicateBytes: UInt64 {
+        guard let duplicateReport else { return 0 }
+        let sizes = Dictionary(uniqueKeysWithValues: duplicateReport.groups.flatMap {
+            $0.files.map { ($0.path, $0.sizeBytes) }
+        })
+        return duplicateSelections.values
+            .flatMap(\.selectedDeletionPaths)
+            .reduce(0) { total, path in
+                let size = sizes[path] ?? 0
+                return total > UInt64.max - size ? UInt64.max : total + size
+            }
+    }
+
+    private func duplicateCleanupRequest() throws -> DuplicateCleanupRequest {
+        guard let duplicateReport else {
+            throw DuplicateSelectionError.groupMembershipChanged(groupID: "scan")
+        }
+        return try DuplicateCleanupRequest.make(
+            selections: Array(duplicateSelections.values),
+            currentGroups: duplicateReport.groups
+        )
+    }
+
+    func preflightDuplicateCleanup(_ completion: @escaping (Bool) -> Void) {
+        guard selectedDuplicateCount > 0, !isCleaningDuplicates else {
+            completion(false)
+            return
+        }
+        let request: DuplicateCleanupRequest
+        do {
+            request = try duplicateCleanupRequest()
+        } catch {
+            duplicateCleanupMessage = "Duplicate selection changed; rescan before cleanup."
+            completion(false)
+            return
+        }
+
+        isCleaningDuplicates = true
+        duplicateCleanupMessage = nil
+        duplicateCleanupOutcomes = []
+        Task {
+            defer { isCleaningDuplicates = false }
+            do {
+                let response = try await service.duplicateCleanup(
+                    request: request,
+                    dryRun: true
+                )
+                duplicateCleanupOutcomes = response.outcomes
+                duplicateReviewTokens = Dictionary(
+                    uniqueKeysWithValues: response.outcomes.compactMap {
+                        guard $0.error == nil, let token = $0.reviewToken else { return nil }
+                        return ($0.path, token)
+                    }
+                )
+                let requestedCount = request.groups.reduce(0) { $0 + $1.deletePaths.count }
+                guard requestedCount > 0,
+                      duplicateReviewTokens.count == requestedCount,
+                      response.failedCount == 0 else {
+                    duplicateReviewTokens.removeAll()
+                    duplicateCleanupMessage = response.groups
+                        .compactMap(\.error)
+                        .first
+                        ?? response.outcomes.compactMap(\.error).first
+                        ?? "Duplicate cleanup review failed; rescan and try again."
+                    completion(false)
+                    return
+                }
+                duplicateCleanupMessage = "Review passed for \(requestedCount) duplicate copy/copies."
+                completion(true)
+            } catch {
+                duplicateReviewTokens.removeAll()
+                duplicateCleanupMessage = error.localizedDescription
+                completion(false)
+            }
+        }
+    }
+
+    func cleanSelectedDuplicates() {
+        guard selectedDuplicateCount > 0, !isCleaningDuplicates else { return }
+        let request: DuplicateCleanupRequest
+        do {
+            request = try duplicateCleanupRequest()
+        } catch {
+            duplicateCleanupMessage = "Duplicate selection changed; rescan before cleanup."
+            return
+        }
+        let requestedCount = request.groups.reduce(0) { $0 + $1.deletePaths.count }
+        guard duplicateReviewTokens.count == requestedCount else {
+            duplicateCleanupMessage = "Duplicate review expired. Review selected copies again."
+            return
+        }
+
+        isCleaningDuplicates = true
+        duplicateCleanupMessage = nil
+        duplicateCleanupOutcomes = []
+        Task {
+            defer { isCleaningDuplicates = false }
+            do {
+                let response = try await service.duplicateCleanup(
+                    request: request,
+                    reviewTokens: duplicateReviewTokens,
+                    dryRun: false
+                )
+                duplicateCleanupOutcomes = response.outcomes
+                duplicateReviewTokens.removeAll()
+                let session = response.sessionId.map { " Session: \($0)." } ?? ""
+                let receiptWarning = response.receiptError.map {
+                    " Receipt warning: \($0) Use Finder’s Trash for recovery."
+                } ?? ""
+                duplicateCleanupMessage =
+                    "Moved \(response.movedCount) duplicate copy/copies (\(formatBytes(response.movedBytes))) to Trash; \(response.failedCount) failed.\(session)\(receiptWarning)"
+                loadHistory()
+                scanDuplicates(preservingCleanupResults: true)
+            } catch {
+                duplicateReviewTokens.removeAll()
+                duplicateCleanupMessage = error.localizedDescription
+            }
+        }
     }
 
     private func tickScanProgress() {

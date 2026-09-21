@@ -276,6 +276,7 @@ struct DuplicateReport: Codable {
     let partial: Bool
     let errorCount: UInt64
     let totalWastedBytes: UInt64
+    let elapsedMs: UInt64?
     let groups: [DuplicateGroup]
 }
 
@@ -305,6 +306,45 @@ struct DuplicateFile: Codable, Identifiable {
     let path: String
     let sizeBytes: UInt64
     let modifiedAt: UInt64
+}
+
+struct DuplicateCleanupResponse: Codable {
+    let dryRun: Bool
+    let sessionId: String?
+    let receiptError: String?
+    let movedCount: Int
+    let failedCount: Int
+    let totalBytes: UInt64
+    let movedBytes: UInt64
+    let reclaimedBytes: UInt64
+    let groups: [DuplicateCleanupGroupOutcome]
+    let outcomes: [DuplicateCleanupItemOutcome]
+}
+
+struct DuplicateCleanupGroupOutcome: Codable, Identifiable {
+    var id: String { groupID }
+    let groupID: String
+    let keeperPath: String
+    let valid: Bool
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case groupID = "id"
+        case keeperPath
+        case valid
+        case error
+    }
+}
+
+struct DuplicateCleanupItemOutcome: Codable, Identifiable {
+    var id: String { "\(groupId):\(path)" }
+    let groupId: String
+    let keeperPath: String
+    let path: String
+    let moved: Bool
+    let trashPath: String?
+    let error: String?
+    let reviewToken: String?
 }
 
 struct InstalledApplication: Codable, Identifiable, Equatable {

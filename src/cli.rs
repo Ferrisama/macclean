@@ -157,6 +157,13 @@ pub enum Commands {
         #[arg(long, hide = true)]
         progress: bool,
     },
+    #[command(name = "app-dupes-trash")]
+    AppDupesTrash {
+        #[arg(long, conflicts_with = "request_file")]
+        request_json: Option<String>,
+        #[arg(long, conflicts_with = "request_json")]
+        request_file: Option<std::path::PathBuf>,
+    },
     Largest {
         #[arg(long, default_value_t = 100u64)]
         min_mb: u64,
@@ -414,6 +421,10 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
             min_mb,
             progress,
         } => run_app_dupes(path, min_mb, progress),
+        Commands::AppDupesTrash {
+            request_json,
+            request_file,
+        } => run_app_dupes_trash(request_json, request_file, dry_run),
         Commands::Largest {
             min_mb,
             limit,
@@ -506,6 +517,32 @@ fn run_app_dupes(path: std::path::PathBuf, min_mb: u64, progress: bool) -> Resul
         let report = cleaners::dupes::analyze(&path, min_bytes)?;
         println!("{}", serde_json::to_string_pretty(&report)?);
     }
+    Ok(())
+}
+
+fn run_app_dupes_trash(
+    request_json: Option<String>,
+    request_file: Option<std::path::PathBuf>,
+    dry_run: bool,
+) -> Result<()> {
+    let request_json = match (request_json, request_file) {
+        (Some(json), None) => json,
+        (None, Some(path)) => std::fs::read_to_string(&path).map_err(|error| {
+            anyhow::anyhow!(
+                "Could not read duplicate cleanup request {}: {}",
+                path.display(),
+                error
+            )
+        })?,
+        (None, None) => {
+            anyhow::bail!("Duplicate cleanup requires --request-json or --request-file.")
+        }
+        (Some(_), Some(_)) => unreachable!("clap rejects conflicting request sources"),
+    };
+    let request: cleaners::dupes::DuplicateCleanupRequest = serde_json::from_str(&request_json)
+        .map_err(|error| anyhow::anyhow!("Invalid duplicate cleanup request: {}", error))?;
+    let response = cleaners::dupes::cleanup(request, dry_run);
+    println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
 

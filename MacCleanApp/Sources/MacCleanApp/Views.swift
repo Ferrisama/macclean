@@ -163,6 +163,7 @@ enum MapSort: String, CaseIterable, Identifiable {
 
 struct DuplicatesView: View {
     @ObservedObject var model: AppModel
+    @State private var confirmingCleanup = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -170,7 +171,8 @@ struct DuplicatesView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Duplicate Files")
                         .font(.title2.bold())
-                    Text("Read-only beta: files are grouped only after their SHA-256 contents match.")
+                        .accessibilityIdentifier("duplicates.title")
+                    Text("Files are grouped only after their SHA-256 contents match. Choose one keeper before cleanup.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -191,6 +193,7 @@ struct DuplicatesView: View {
                         Label("Find Duplicates", systemImage: "doc.on.doc")
                     }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("duplicates.scan")
                 }
             }
 
@@ -233,12 +236,96 @@ struct DuplicatesView: View {
                     EmptyPanelText("No content-identical files at or above \(model.duplicateMinMB) MB.")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(model.selectedDuplicateCount) copy/copies selected")
+                                .font(.headline)
+                            Text("\(formatBytes(model.selectedDuplicateBytes)) will move to Trash; one keeper per group is protected.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if model.isCleaningDuplicates {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Button {
+                            model.preflightDuplicateCleanup { passed in
+                                confirmingCleanup = passed
+                            }
+                        } label: {
+                            Label("Move Selected to Trash", systemImage: "trash")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .disabled(model.selectedDuplicateCount == 0 || model.isCleaningDuplicates)
+                        .accessibilityIdentifier("duplicates.cleanup")
+                    }
+
+                    if let message = model.duplicateCleanupMessage {
+                        Text(message)
+                            .font(.callout)
+                            .foregroundStyle(model.duplicateCleanupOutcomes.contains { $0.error != nil }
+                                ? Color.orange
+                                : Color.secondary)
+                            .textSelection(.enabled)
+                    }
+
+                    let failedOutcomes = model.duplicateCleanupOutcomes.filter { $0.error != nil }
+                    if !failedOutcomes.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(failedOutcomes) { outcome in
+                                Text("\(outcome.path): \(outcome.error ?? "Unknown error")")
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.orange)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+
                     List(report.groups) { group in
                         Section {
+                            HStack {
+                                Picker(
+                                    "Keep",
+                                    selection: Binding(
+                                        get: {
+                                            model.duplicateSelections[group.id]?.strategy ?? .newest
+                                        },
+                                        set: { model.setDuplicateStrategy($0, for: group) }
+                                    )
+                                ) {
+                                    Text("Newest").tag(DuplicateKeepStrategy.newest)
+                                    Text("Oldest").tag(DuplicateKeepStrategy.oldest)
+                                    Text("Shortest path").tag(DuplicateKeepStrategy.shortestPath)
+                                    Text("Manual").tag(DuplicateKeepStrategy.manual)
+                                }
+                                .frame(width: 240)
+                                Spacer()
+                                Button("Select Copies") {
+                                    model.selectDuplicateCopies(in: group)
+                                }
+                                Button("Clear") {
+                                    model.clearDuplicateCopies(in: group)
+                                }
+                            }
                             ForEach(group.files) { file in
                                 HStack(spacing: 10) {
-                                    Image(systemName: "doc")
-                                        .foregroundStyle(.secondary)
+                                    let selection = model.duplicateSelections[group.id]
+                                    let isKeeper = selection?.keeperPath == file.path
+                                    let isSelected = selection?.selectedDeletionPaths.contains(file.path) == true
+                                    Button {
+                                        model.toggleDuplicateDeletion(path: file.path, in: group)
+                                    } label: {
+                                        Image(systemName: isKeeper
+                                            ? "shield.checkered"
+                                            : isSelected ? "checkmark.square.fill" : "square")
+                                            .foregroundStyle(isKeeper ? .green : .secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(isKeeper)
+                                    .accessibilityIdentifier("duplicates.select.\(file.path)")
+                                    .help(isKeeper ? "This copy is protected as the keeper" : "Move this copy to Trash")
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(URL(fileURLWithPath: file.path).lastPathComponent)
                                         Text(file.path)
@@ -249,6 +336,16 @@ struct DuplicatesView: View {
                                     Spacer()
                                     Text(formatBytes(file.sizeBytes))
                                         .monospacedDigit()
+                                    if !isKeeper {
+                                        Button("Keep") {
+                                            model.keepDuplicate(path: file.path, in: group)
+                                        }
+                                        .buttonStyle(.link)
+                                    } else {
+                                        Text("Keeper")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.green)
+                                    }
                                     Button {
                                         revealInFinder(file.path)
                                     } label: {
@@ -256,6 +353,7 @@ struct DuplicatesView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .help("Reveal in Finder")
+                                    .accessibilityIdentifier("duplicates.reveal.\(file.path)")
                                 }
                             }
                         } header: {
@@ -274,6 +372,18 @@ struct DuplicatesView: View {
             }
         }
         .padding(16)
+        .confirmationDialog(
+            "Move selected duplicate copies to Trash?",
+            isPresented: $confirmingCleanup,
+            titleVisibility: .visible
+        ) {
+            Button("Move \(model.selectedDuplicateCount) Copy/Copies to Trash", role: .destructive) {
+                model.cleanSelectedDuplicates()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The chosen keeper in every group remains in place. Moved copies are recoverable from History or Finder’s Trash until Trash is emptied.")
+        }
     }
 }
 
