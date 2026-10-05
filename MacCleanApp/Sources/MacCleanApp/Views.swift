@@ -2,67 +2,59 @@ import SwiftUI
 
 struct DashboardView: View {
     @ObservedObject var model: AppModel
-
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                RecipeStrip(model: model)
-                if let scan = model.displayScan {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 14)], spacing: 14) {
-                    MetricCard(
-                        title: "Scanned",
-                        value: formatBytes(scan.rootScan.tree.sizeBytes),
-                        subtitle: "\(scan.rootScan.elapsedMs) ms • \(scan.rootScan.partial ? "partial" : "complete")"
-                    )
-                    if let systemData = scan.systemData {
-                        MetricCard(
-                            title: "System Data",
-                            value: formatBytes(systemData.totalBytes),
-                            subtitle: "\(systemData.elapsedMs) ms • \(systemData.partial ? "partial" : "complete")"
-                        )
-                    }
+        WorkspacePage {
+            WorkspaceHeading(title: "Your Mac, at a glance", subtitle: "Understand your storage and review what you can reclaim.")
+            if let scan = model.displayScan {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 16)], spacing: 16) {
+                    MetricCard(title: "Scanned", value: formatBytes(scan.rootScan.tree.sizeBytes), subtitle: scan.rootScan.partial ? "Partial coverage" : "Scan complete")
+                    if let data = scan.systemData { MetricCard(title: "System Data", value: formatBytes(data.totalBytes), subtitle: "Estimated storage") }
                     if let health = scan.health {
-                        MetricCard(
-                            title: "Disk Free",
-                            value: formatBytes(health.diskFree),
-                            subtitle: "\(diskPercent(health))% used"
-                        )
-                        MetricCard(
-                            title: "Memory",
-                            value: formatBytes(health.memUsed),
-                            subtitle: "\(memoryPercent(health))% used"
-                        )
+                        MetricCard(title: "Disk Free", value: formatBytes(health.diskFree), subtitle: "\(diskPercent(health))% used")
+                        MetricCard(title: "Memory", value: formatBytes(health.memUsed), subtitle: "\(memoryPercent(health))% used")
                     }
                 }
-
-                HStack(alignment: .top, spacing: 14) {
-                    SafetySummaryCard(totals: scan.safetyTotals)
-                    LargestListCard(
-                        title: "Largest Items",
-                        items: scan.largestItems,
-                        selectedItem: $model.selectedItem,
-                        onOpen: model.openInMap
-                    )
-                }
-                .padding(.top, 14)
-
-                if let systemData = scan.systemData {
-                    SystemDataCard(systemData: systemData)
-                        .padding(.top, 14)
-                }
-                } else {
-                    EmptyPanelText("No cached map scan yet. Recipes are available now; run Fast Scan when you want the map.")
-                        .frame(minHeight: 180)
-                }
+            }
+            RecipeStrip(model: model)
+            if let scan = model.displayScan {
+                LargestListCard(title: "Largest Items", items: Array(scan.largestItems.prefix(8)), selectedItem: $model.selectedItem, onOpen: model.openInMap)
+                SafetySummaryCard(totals: scan.safetyTotals)
+                if let data = scan.systemData { SystemDataCard(systemData: data) }
+            } else {
+                EmptyPanelText("Choose a folder and start a scan. Known cleanup opportunities are already available above.")
             }
         }
-        .padding(16)
-        .overlay(alignment: .topTrailing) {
-            if model.isScanning {
-                ScanOverlay(stage: model.scanStage, elapsed: model.scanElapsedSeconds)
-                    .padding(16)
-            }
+    }
+}
+
+struct SafeCleanupView: View {
+    @ObservedObject var model: AppModel
+    @State private var search = ""
+    private var items: [AppScanItem] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return model.safeOpportunities().filter {
+            query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)
+                || $0.path.localizedCaseInsensitiveContains(query) || $0.cleanKind.localizedCaseInsensitiveContains(query)
         }
+    }
+    var body: some View {
+        WorkspacePage {
+            WorkspaceHeading(title: "Safe Cleanup", subtitle: "Regenerable caches and artifacts, largest first. Click any row to inspect it.")
+            HStack(spacing: 10) {
+                TextField("Search caches, names, or paths", text: $search).textFieldStyle(.roundedBorder).accessibilityIdentifier("safe.search")
+                Button { model.loadRecipes() } label: { Label("Refresh", systemImage: "arrow.clockwise") }.disabled(model.isLoadingRecipes)
+                Button { model.scanHomeForSafeCleanup() } label: { Label("Find Hidden Caches", systemImage: "magnifyingglass") }
+                    .disabled(model.isScanning).help("Deep scan your home folder, including hidden folders.")
+            }
+            Text("\(items.count) opportunities • largest first").font(.callout).foregroundStyle(.secondary)
+            if let scan = model.scan, scan.rootScan.partial { PartialScanNotice(reason: scan.rootScan.incompleteReason) }
+            CandidateList(items: items, selectedItem: $model.selectedItem, selectedPaths: $model.selectedCleanupPaths,
+                          selectedTotal: model.selectedCleanupTotal(from: model.safeOpportunities()), isCleaning: model.isCleaning || model.isScanning,
+                          message: model.cleanupMessage, outcomes: model.cleanupOutcomes,
+                          onSelectSafe: { model.selectSafeCandidates(from: items) }, onClear: model.clearCleanupSelection,
+                          onToggle: model.toggleCleanup, onPreflight: model.preflightCleanup, onClean: model.cleanSelected, onOpen: model.openInMap)
+        }
+        .onAppear { model.retainSafeCleanupSelection() }
     }
 }
 
@@ -76,31 +68,24 @@ struct MapView: View {
         ScreenScaffold(model: model) { scan in
             GeometryReader { proxy in
                 let items = visibleItems(scan)
-                VStack(spacing: 12) {
+                WorkspacePage {
+                    WorkspaceHeading(title: "Storage Map", subtitle: "Click a tile to inspect it. Double-click a folder or use Open Folder to explore it.")
                     navigationBar(scan: scan)
                     filterBar(scan: scan)
-
-                    if proxy.size.width >= 1_020 {
-                        HStack(alignment: .top, spacing: 14) {
-                            mapCanvas(items: items, minimumHeight: 340)
-                            MapDetailsPanel(
-                                items: items,
-                                selectedItem: $model.selectedItem,
-                                onOpen: model.open
-                            )
-                            .frame(width: min(360, proxy.size.width * 0.29))
-                        }
-                    } else {
-                        VStack(spacing: 12) {
-                            mapCanvas(items: items, minimumHeight: 240)
-                            MapCompactInspector(
-                                item: inspectorItem(scan),
-                                onOpen: model.open
-                            )
+                    mapCanvas(items: items, minimumHeight: 240).frame(height: min(420, max(240, proxy.size.width * 0.42)))
+                    MapCompactInspector(item: inspectorItem(scan), onOpen: model.open)
+                    HStack {
+                        Text("Folders and files").font(.headline)
+                        Spacer()
+                        Text("\(items.count) items").foregroundStyle(.secondary)
+                    }
+                    LazyVStack(spacing: 8) {
+                        ForEach(items) { item in
+                            MapItemRow(item: item, isSelected: model.selectedItem?.id == item.id,
+                                       onSelect: { model.selectedItem = item }, onOpen: { model.open(item) })
                         }
                     }
                 }
-                .padding(14)
             }
         }
     }
@@ -157,33 +142,20 @@ struct MapView: View {
     }
 
     private func filterBar(scan: AppScan) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                Picker("Sort", selection: $sortMode) {
-                    ForEach(MapSort.allCases) { mode in Text(mode.title).tag(mode) }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 225)
-
-                Picker("Safety", selection: $safetyFilter) {
-                    Text("All safety levels").tag(StorageSafety?.none)
-                    ForEach(StorageSafety.allCases) { safety in
-                        Text(safety.label).tag(Optional(safety))
-                    }
-                }
-                .frame(width: 210)
-
-                Picker("Type", selection: $kindFilter) {
-                    Text("All types").tag(String?.none)
-                    ForEach(mapKinds(scan), id: \.self) { kind in
-                        Text(kind.capitalized).tag(Optional(kind))
-                    }
-                }
-                .frame(width: 190)
-
-                SafetyLegend()
+        HStack(spacing: 12) {
+            Picker("Sort", selection: $sortMode) {
+                ForEach(MapSort.allCases) { mode in Text(mode.title).tag(mode) }
+            }
+            Picker("Safety", selection: $safetyFilter) {
+                Text("All safety levels").tag(StorageSafety?.none)
+                ForEach(StorageSafety.allCases) { safety in Text(safety.label).tag(Optional(safety)) }
+            }
+            Picker("Type", selection: $kindFilter) {
+                Text("All types").tag(String?.none)
+                ForEach(mapKinds(scan), id: \.self) { kind in Text(kind.capitalized).tag(Optional(kind)) }
             }
         }
+        .pickerStyle(.menu)
         .aeroControlGroup()
     }
 
@@ -196,9 +168,9 @@ struct MapView: View {
             selectedItem: $model.selectedItem,
             onOpen: model.open
         )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity)
         .frame(minHeight: minimumHeight)
-        .aeroPanel(cornerRadius: 24, padding: 8)
+        .aeroPanel(cornerRadius: 12, padding: 8)
     }
 
     private func visibleItems(_ scan: AppScan) -> [AppScanItem] {
@@ -223,42 +195,6 @@ struct MapView: View {
             return selected
         }
         return items.first
-    }
-}
-
-struct MapDetailsPanel: View {
-    let items: [AppScanItem]
-    @Binding var selectedItem: AppScanItem?
-    let onOpen: (AppScanItem) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Largest items")
-                    .font(.headline)
-                Spacer()
-                Text("\(items.count)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    ForEach(items) { item in
-                        MapItemRow(
-                            item: item,
-                            isSelected: selectedItem?.id == item.id,
-                            onSelect: { selectedItem = item },
-                            onOpen: { onOpen(item) }
-                        )
-                    }
-                }
-            }
-
-            Divider().opacity(0.45)
-            MapInspectorContent(item: selectedItem ?? items.first, onOpen: onOpen)
-        }
-        .aeroPanel(cornerRadius: 24, padding: 14)
     }
 }
 
@@ -341,7 +277,7 @@ struct MapInspectorContent: View {
                 Text(item.path)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                 Text(item.cleanupReason)
                     .font(.caption)
@@ -351,7 +287,7 @@ struct MapInspectorContent: View {
                     SafetyBadge(safety: item.safety)
                     Spacer()
                     if item.isDir {
-                        Button("Open") { onOpen(item) }
+                        Button("Open Folder") { onOpen(item) }
                     }
                     Button("Reveal") { revealInFinder(item.path) }
                 }
@@ -375,17 +311,9 @@ struct DuplicatesView: View {
     @State private var confirmingCleanup = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        WorkspacePage {
+            WorkspaceHeading(title: "Duplicate Files", subtitle: "Choose a keeper, inspect the matching copies, then review your selection.")
             HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Duplicate Files")
-                        .font(.title2.bold())
-                        .accessibilityIdentifier("duplicates.title")
-                    Text("Files are grouped only after their SHA-256 contents match. Choose one keeper before cleanup.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
                 Stepper(
                     "Minimum \(model.duplicateMinMB) MB",
                     value: $model.duplicateMinMB,
@@ -433,7 +361,6 @@ struct DuplicatesView: View {
                         subtitle: "\(report.hashedFiles) candidate file(s) hashed"
                     )
                 }
-                .frame(maxHeight: 125)
 
                 if report.partial {
                     PartialScanNotice(
@@ -443,7 +370,7 @@ struct DuplicatesView: View {
 
                 if report.groups.isEmpty {
                     EmptyPanelText("No content-identical files at or above \(model.duplicateMinMB) MB.")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(maxWidth: .infinity, minHeight: 140)
                 } else {
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 2) {
@@ -494,8 +421,9 @@ struct DuplicatesView: View {
                         }
                     }
 
-                    List(report.groups) { group in
-                        Section {
+                    LazyVStack(spacing: 16) {
+                    ForEach(report.groups) { group in
+                        GroupBox {
                             HStack {
                                 Picker(
                                     "Keep",
@@ -567,7 +495,7 @@ struct DuplicatesView: View {
                                     .accessibilityIdentifier("duplicates.reveal.\(file.path)")
                                 }
                             }
-                        } header: {
+                        } label: {
                             HStack {
                                 Text("\(group.files.count) copies")
                                 Spacer()
@@ -575,15 +503,13 @@ struct DuplicatesView: View {
                             }
                         }
                     }
-                    .listStyle(.inset)
-                    .scrollContentBackground(.hidden)
+                    }
                 }
             } else {
                 EmptyPanelText("Choose a folder in the toolbar, then find duplicates. No files will be selected or removed.")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(maxWidth: .infinity, minHeight: 140)
             }
         }
-        .padding(16)
         .confirmationDialog(
             "Move selected duplicate copies to Trash?",
             isPresented: $confirmingCleanup,
@@ -603,101 +529,91 @@ struct DuplicatesView: View {
 
 struct CleanReviewView: View {
     @ObservedObject var model: AppModel
-
+    private var items: [AppScanItem] {
+        if let scan = model.scan { return model.cleanupReviewItems(in: scan) }
+        return model.recipeCandidateItems()
+    }
     var body: some View {
-        if let scan = model.scan {
-            let reviewItems = model.cleanupReviewItems(in: scan)
-            HSplitView {
-                VStack(spacing: 12) {
-                    RecipeStrip(model: model)
-                CandidateList(
-                    items: reviewItems,
-                    selectedItem: $model.selectedItem,
-                    selectedPaths: $model.selectedCleanupPaths,
-                    selectedTotal: model.selectedCleanupTotal(in: scan),
-                    isCleaning: model.isCleaning,
-                    message: model.cleanupMessage,
-                    outcomes: model.cleanupOutcomes,
-                    onSelectSafe: { model.selectSafeCandidates(from: reviewItems) },
-                    onClear: model.clearCleanupSelection,
-                    onToggle: model.toggleCleanup,
-                    onPreflight: model.preflightCleanup,
-                    onClean: model.cleanSelected,
-                    onOpen: model.open
-                )
-                }
-                    .padding(16)
-                InspectorCard(item: model.selectedItem ?? reviewItems.first)
-                    .padding(16)
-                    .frame(minWidth: 380)
-            }
-            .overlay(alignment: .topTrailing) {
-                if model.isScanning {
-                    ScanOverlay(stage: model.scanStage, elapsed: model.scanElapsedSeconds)
-                        .padding(16)
-                }
-            }
-        } else {
-            let recipeItems = model.recipeCandidateItems()
-            VStack(spacing: 14) {
-                RecipeStrip(model: model)
-                CandidateList(
-                    items: recipeItems,
-                    selectedItem: $model.selectedItem,
-                    selectedPaths: $model.selectedCleanupPaths,
-                    selectedTotal: model.selectedCleanupTotalForRecipeOnly(),
-                    isCleaning: model.isCleaning,
-                    message: model.cleanupMessage,
-                    outcomes: model.cleanupOutcomes,
-                    onSelectSafe: { model.selectSafeCandidates(from: recipeItems) },
-                    onClear: model.clearCleanupSelection,
-                    onToggle: model.toggleCleanup,
-                    onPreflight: model.preflightCleanup,
-                    onClean: model.cleanSelected,
-                    onOpen: model.open
-                )
-            }
-            .padding(16)
+        WorkspacePage {
+            WorkspaceHeading(title: "Cleanup Review", subtitle: "Inspect paths and choose what to move to Trash. Every removal is reviewed before confirmation.")
+            DisclosureGroup("Cleanup recipes") { RecipeStrip(model: model).padding(.top, 12) }
+            if let recipe = model.selectedRecipe { Label(recipe.title, systemImage: "checklist").font(.headline) }
+            CandidateList(items: items, selectedItem: $model.selectedItem, selectedPaths: $model.selectedCleanupPaths,
+                          selectedTotal: model.selectedCleanupTotal(from: items), isCleaning: model.isCleaning || model.isScanning,
+                          message: model.cleanupMessage, outcomes: model.cleanupOutcomes,
+                          onSelectSafe: { model.selectSafeCandidates(from: items) }, onClear: model.clearCleanupSelection,
+                          onToggle: model.toggleCleanup, onPreflight: model.preflightCleanup, onClean: model.cleanSelected, onOpen: model.openInMap)
         }
     }
 }
 
 struct DeveloperView: View {
     @ObservedObject var model: AppModel
-
-    var body: some View {
-        ScreenScaffold(model: model) { scan in
-            let devItems = scan.cleanupCandidates.filter {
-                $0.cleanKind.localizedCaseInsensitiveContains("dev")
-                    || $0.path.localizedCaseInsensitiveContains("docker")
-                    || $0.path.localizedCaseInsensitiveContains("xcode")
-                    || $0.path.localizedCaseInsensitiveContains("android")
-                    || $0.path.localizedCaseInsensitiveContains("node_modules")
-            }
-
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Developer Cleanup")
-                    .font(.title2.bold())
-                Text("Generated artifacts, package caches, Docker data, simulators, and build output.")
-                    .foregroundStyle(.secondary)
-                CandidateList(
-                    items: devItems.isEmpty ? scan.cleanupCandidates : devItems,
-                    selectedItem: $model.selectedItem,
-                    selectedPaths: $model.selectedCleanupPaths,
-                    selectedTotal: model.selectedCleanupTotal(in: scan),
-                    isCleaning: model.isCleaning,
-                    message: model.cleanupMessage,
-                    outcomes: model.cleanupOutcomes,
-                    onSelectSafe: { model.selectSafeCandidates(in: scan) },
-                    onClear: model.clearCleanupSelection,
-                    onToggle: model.toggleCleanup,
-                    onPreflight: model.preflightCleanup,
-                    onClean: model.cleanSelected,
-                    onOpen: model.open
-                )
-            }
-            .padding(16)
+    private var items: [AppScanItem] {
+        (model.scan?.cleanupCandidates ?? []).filter {
+            $0.cleanKind.localizedCaseInsensitiveContains("dev") || $0.path.contains("/.cargo/")
+                || $0.path.contains("/.gradle/") || $0.path.contains("/node_modules")
         }
+    }
+    var body: some View {
+        WorkspacePage {
+            WorkspaceHeading(title: "Developer Cleanup", subtitle: "Review generated build output and package caches. Rust targets require manual selection.")
+            HStack {
+                Button("Find Home Build Output") {
+                    model.scanCleanupScope(NSHomeDirectory(), tab: .developer)
+                }.disabled(model.isScanning || model.isCleaning)
+                Button("Review Temporary Builds") { model.selectedTab = .temporary }
+            }
+            Text("Stop builds and tests before cleaning. Sources are preserved; the next build may take longer.")
+                .font(.callout).foregroundStyle(.secondary)
+            if let scan = model.scan, scan.rootScan.partial { PartialScanNotice(reason: scan.rootScan.incompleteReason) }
+            if model.scan == nil { EmptyPanelText("Scan your home folder to find project build output, including hidden folders.") }
+            CandidateList(items: items, selectedItem: $model.selectedItem, selectedPaths: $model.selectedCleanupPaths,
+                          selectedTotal: model.selectedCleanupTotal(from: items), isCleaning: model.isCleaning || model.isScanning,
+                          message: model.cleanupMessage, outcomes: model.cleanupOutcomes,
+                          onSelectSafe: { model.selectSafeCandidates(from: items) }, onClear: model.clearCleanupSelection,
+                          onToggle: model.toggleCleanup, onPreflight: model.preflightCleanup, onClean: model.cleanSelected,
+                          onOpen: model.openInMap)
+        }
+        .onAppear { model.clearCleanupSelection() }
+    }
+}
+
+struct TemporaryBuildsView: View {
+    @ObservedObject var model: AppModel
+    private var hasTemporaryScan: Bool {
+        model.scan?.rootScan.root == "/private/tmp" || model.scan?.rootScan.root == "/tmp"
+    }
+    private var items: [AppScanItem] {
+        guard hasTemporaryScan else { return [] }
+        return (model.scan?.cleanupCandidates ?? []).filter {
+            let url = URL(fileURLWithPath: $0.path)
+            return ["/private/tmp", "/tmp"].contains(url.deletingLastPathComponent().path)
+                && (url.lastPathComponent == "target" || url.lastPathComponent.hasSuffix("-target"))
+                && $0.safety == .review && $0.cleanKind.localizedCaseInsensitiveContains("dev") && $0.canMoveToTrash
+        }.sorted { $0.sizeBytes > $1.sizeBytes }
+    }
+    var body: some View {
+        WorkspacePage {
+            WorkspaceHeading(title: "Temporary Builds", subtitle: "Review Cargo build folders in /private/tmp, largest first.")
+            Button { model.scanCleanupScope("/private/tmp", tab: .temporary) } label: {
+                Label(hasTemporaryScan ? "Refresh Temporary Builds" : "Find Temporary Builds", systemImage: "magnifyingglass")
+            }.disabled(model.isScanning || model.isCleaning)
+            Text("Only verified Cargo targets owned by your account are offered. Each folder needs manual selection. Stop builds first; open files are checked before removal.")
+                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if !hasTemporaryScan {
+                EmptyPanelText("Run a temporary-folder scan to see eligible build output. Other temporary and system data are excluded.")
+            } else if let scan = model.scan, scan.rootScan.partial {
+                PartialScanNotice(reason: scan.rootScan.incompleteReason)
+            }
+            CandidateList(items: items, selectedItem: $model.selectedItem, selectedPaths: $model.selectedCleanupPaths,
+                          selectedTotal: model.selectedCleanupTotal(from: items), isCleaning: model.isCleaning || model.isScanning,
+                          message: model.cleanupMessage, outcomes: model.cleanupOutcomes,
+                          onSelectSafe: { model.selectSafeCandidates(from: items) }, onClear: model.clearCleanupSelection,
+                          onToggle: model.toggleCleanup, onPreflight: model.preflightCleanup, onClean: model.cleanSelected,
+                          onOpen: model.openInMap)
+        }
+        .onAppear { model.clearCleanupSelection() }
     }
 }
 
@@ -706,8 +622,9 @@ struct MonitorView: View {
 
     var body: some View {
         ScreenScaffold(model: model) { scan in
+            WorkspacePage {
             if let health = scan.health {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 14)], spacing: 14) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 240), spacing: 14)], spacing: 14) {
                     GaugeCard(title: "Disk", percent: diskPercent(health), detail: "\(formatBytes(health.diskFree)) free")
                     GaugeCard(title: "Memory", percent: memoryPercent(health), detail: "\(formatBytes(health.memUsed)) / \(formatBytes(health.memTotal))")
                     MetricCard(title: "CPU", value: health.ncpu, subtitle: health.loadAvg)
@@ -716,9 +633,9 @@ struct MonitorView: View {
                     MetricCard(title: "Firewall", value: health.firewall ? "On" : "Off", subtitle: "Network protection")
                     MetricCard(title: "SIP", value: health.sip ? "On" : "Off", subtitle: "System integrity")
                 }
-                .padding(16)
             } else {
                 EmptyState(message: "Enable Health and run a scan to show monitor data.")
+            }
             }
         }
     }
@@ -728,7 +645,7 @@ struct FullDiskAccessView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        ScrollView {
+        WorkspacePage {
             VStack(alignment: .leading, spacing: 20) {
                 HStack(alignment: .top, spacing: 16) {
                     Image(systemName: accessIcon(model.fullDiskAccessStatus))
@@ -787,7 +704,6 @@ struct FullDiskAccessView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            .padding(24)
             .frame(maxWidth: 760, alignment: .leading)
         }
     }
@@ -797,97 +713,58 @@ struct UninstallView: View {
     @ObservedObject var model: AppModel
     @State private var search = ""
     @State private var deepReview = false
-
     private var filteredApps: [InstalledApplication] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return model.installedApplications }
         return model.installedApplications.filter {
-            $0.name.localizedCaseInsensitiveContains(query)
+            query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)
                 || $0.path.localizedCaseInsensitiveContains(query)
                 || ($0.bundleId?.localizedCaseInsensitiveContains(query) ?? false)
         }
     }
-
     var body: some View {
-        HSplitView {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Installed Applications")
-                        .font(.title2.bold())
-                    Spacer()
-                    Text("\(filteredApps.count)")
-                        .foregroundStyle(.secondary)
-                    Button {
-                        model.loadInstalledApplications()
-                    } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }
+        WorkspacePage {
+            WorkspaceHeading(title: "Installed Applications", subtitle: "Search your apps and open a scrollable removal-plan preview.")
+            HStack {
+                TextField("Search apps, paths, or bundle IDs", text: $search).textFieldStyle(.roundedBorder)
+                Button { model.loadInstalledApplications() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                     .disabled(model.isLoadingInstalledApplications)
-                }
-
-                TextField("Search apps, paths, or bundle IDs", text: $search)
-                    .textFieldStyle(.roundedBorder)
-
-                if let error = model.uninstallListError {
-                    Text(error)
-                        .foregroundStyle(.red)
-                        .textSelection(.enabled)
-                }
-
-                if model.isLoadingInstalledApplications && model.installedApplications.isEmpty {
-                    VStack(spacing: 10) {
-                        ProgressView()
-                        Text("Loading installed applications…")
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if filteredApps.isEmpty {
-                    EmptyPanelText(search.isEmpty ? "No applications found." : "No applications match your search.")
-                } else {
-                    List(filteredApps, selection: Binding(
-                        get: { model.selectedInstalledApplication?.id },
-                        set: { id in
-                            model.selectInstalledApplication(filteredApps.first { $0.id == id })
-                        }
-                    )) { app in
-                        HStack(spacing: 10) {
+            }
+            Text("\(filteredApps.count) applications").foregroundStyle(.secondary)
+            if let error = model.uninstallListError { Text(error).foregroundStyle(.orange).textSelection(.enabled) }
+            if model.isLoadingInstalledApplications && model.installedApplications.isEmpty { ProgressView("Loading applications…") }
+            if filteredApps.isEmpty { EmptyPanelText(search.isEmpty ? "No applications found." : "No applications match your search.") }
+            LazyVStack(spacing: 8) {
+                ForEach(filteredApps) { app in
+                    Button { model.selectInstalledApplication(app) } label: {
+                        HStack(spacing: 12) {
                             ApplicationIcon(path: app.path)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(app.name)
-                                    .font(.headline)
-                                Text(app.bundleId ?? app.path)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(app.name).font(.headline)
+                                Text(app.bundleId ?? app.path).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                             }
                             Spacer()
-                            if app.protected {
-                                Text("Protected")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.purple)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(.purple.opacity(0.14), in: Capsule())
-                            }
-                        }
-                        .padding(.vertical, 3)
-                        .tag(app.id)
-                    }
-                    .listStyle(.inset)
-                    .scrollContentBackground(.hidden)
+                            if app.protected { Text("Protected").font(.caption).foregroundStyle(.purple) }
+                            Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                        }.workspaceRow()
+                    }.buttonStyle(.plain).accessibilityIdentifier("uninstall.app.\(app.path)")
                 }
             }
-            .padding(16)
-            .frame(minWidth: 520)
-
-            UninstallInspector(model: model, deepReview: $deepReview)
-                .padding(16)
-                .frame(minWidth: 480)
         }
-        .task {
-            if model.installedApplications.isEmpty {
-                model.loadInstalledApplications()
+        .task { if model.installedApplications.isEmpty { model.loadInstalledApplications() } }
+        .sheet(isPresented: Binding(
+            get: { model.selectedInstalledApplication != nil },
+            set: { if !$0 { model.selectInstalledApplication(nil) } }
+        )) {
+            VStack(spacing: 0) {
+                HStack {
+                    Text("Application Review").font(.headline)
+                    Spacer()
+                    Button("Done") { model.selectInstalledApplication(nil) }.keyboardShortcut(.cancelAction)
+                }.padding(16)
+                Divider()
+                WorkspacePage { UninstallInspector(model: model, deepReview: $deepReview) }
             }
+            .frame(width: 680, height: 540)
         }
     }
 }
@@ -951,7 +828,6 @@ struct UninstallInspector: View {
                             .textSelection(.enabled)
                     }
 
-                    Spacer()
                     Text("Review is read-only. Nothing is removed by building this plan.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -1056,14 +932,15 @@ struct UninstallPlanPreview: View {
                     .foregroundStyle(.green)
             }
 
-            List(plan.items) { item in
+            LazyVStack(alignment: .leading, spacing: 12) {
+            ForEach(plan.items) { item in
                 VStack(alignment: .leading, spacing: 5) {
                     HStack {
                         Image(systemName: "doc")
                         Text(item.path)
                             .font(.caption.monospaced())
                             .lineLimit(2)
-                        Spacer()
+                        Spacer(minLength: 8)
                         RiskBadge(risk: item.risk)
                         Text(formatBytes(item.sizeBytes))
                             .monospacedDigit()
@@ -1074,8 +951,7 @@ struct UninstallPlanPreview: View {
                 }
                 .padding(.vertical, 3)
             }
-            .listStyle(.inset)
-            .scrollContentBackground(.hidden)
+            }
 
             Label("Read-only preview — no files have been changed.", systemImage: "lock")
                 .font(.caption)
@@ -1138,10 +1014,9 @@ struct HistoryView: View {
     @State private var restoreTarget: HistorySession?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        WorkspacePage {
             HStack {
-                Text("History")
-                    .font(.title2.bold())
+                WorkspaceHeading(title: "History", subtitle: "Review cleanup sessions and restore items from Trash.")
                 Spacer()
                 Button {
                     model.loadHistory()
@@ -1159,7 +1034,8 @@ struct HistoryView: View {
             if model.history.isEmpty {
                 EmptyPanelText(model.isLoadingHistory ? "Loading history..." : "No cleanup history yet.")
             } else {
-                List(model.history) { session in
+                LazyVStack(spacing: 10) {
+                ForEach(model.history) { session in
                     HStack {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(session.cleaner)
@@ -1168,14 +1044,12 @@ struct HistoryView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        Spacer()
+                        Spacer(minLength: 12)
                         Text("\(session.itemCount) item(s)")
                         Text(formatBytes(session.totalBytes))
                             .monospacedDigit()
                             .frame(width: 100, alignment: .trailing)
-                        Text("\(session.restorableCount) restorable")
-                            .foregroundStyle(.secondary)
-                            .frame(width: 110, alignment: .trailing)
+
                         Button {
                             restoreTarget = session
                         } label: {
@@ -1183,13 +1057,11 @@ struct HistoryView: View {
                         }
                         .disabled(session.restorableCount == 0 || model.isRestoring)
                     }
-                    .padding(.vertical, 4)
+                    .workspaceRow()
                 }
-                .scrollContentBackground(.hidden)
+                }
             }
-            Spacer()
         }
-        .padding(16)
         .task {
             model.loadHistory()
         }
@@ -1211,34 +1083,23 @@ struct HistoryView: View {
 struct ScreenScaffold<Content: View>: View {
     @ObservedObject var model: AppModel
     let content: (AppScan) -> Content
-
     init(model: AppModel, @ViewBuilder content: @escaping (AppScan) -> Content) {
         self.model = model
         self.content = content
     }
-
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Group {
-                if let scan = model.displayScan {
-                    content(scan)
-                } else if let message = model.errorMessage {
-                    EmptyState(message: message)
-                } else {
-                    EmptyState(message: model.isScanning ? "Scanning..." : "Run a scan to begin.")
+        VStack(spacing: 0) {
+            if let scan = model.displayScan {
+                if scan.rootScan.partial {
+                    PartialScanNotice(reason: scan.rootScan.incompleteReason).padding(.horizontal, 20).padding(.top, 8)
+                }
+                content(scan)
+            } else {
+                WorkspacePage {
+                    EmptyState(message: model.errorMessage ?? (model.isScanning ? "Scanning…" : "Choose a folder and run a scan to begin."))
                 }
             }
-            if model.isScanning {
-                ScanOverlay(stage: model.scanStage, elapsed: model.scanElapsedSeconds)
-                    .padding(16)
-            }
-        }
-        .overlay(alignment: .bottomLeading) {
-            if let scan = model.displayScan, scan.rootScan.partial {
-                PartialScanNotice(reason: scan.rootScan.incompleteReason)
-                    .padding(16)
-            }
-        }
+        }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
@@ -1252,27 +1113,7 @@ struct PartialScanNotice: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-            .frame(maxWidth: 420, alignment: .leading)
-    }
-}
-
-struct ScanOverlay: View {
-    let stage: String
-    let elapsed: Int
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-            Text(stage)
-            Text("\(elapsed)s")
-                .monospacedDigit()
-        }
-        .font(.caption)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(.regularMaterial, in: Capsule())
-        .shadow(radius: 6, y: 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1288,6 +1129,7 @@ struct MetricCard: View {
                 .foregroundStyle(.secondary)
             Text(value)
                 .font(.system(size: 30, weight: .bold, design: .rounded))
+                .lineLimit(1).minimumScaleFactor(0.7)
             Text(subtitle)
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -1362,8 +1204,7 @@ struct RecipeCard: View {
             Text(recipe.subtitle)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .lineLimit(3)
-            Spacer()
+                .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Text("\(appEligibleCount) ready item(s)")
                     .font(.caption)
@@ -1379,7 +1220,7 @@ struct RecipeCard: View {
                 .accessibilityIdentifier("recipe.select.\(recipe.id)")
             }
         }
-        .frame(minWidth: 236, maxWidth: .infinity, minHeight: 150, maxHeight: 150)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .aeroSurface(cornerRadius: 16)
     }
@@ -1441,54 +1282,16 @@ struct LargestListCard: View {
     let items: [AppScanItem]
     @Binding var selectedItem: AppScanItem?
     var onOpen: ((AppScanItem) -> Void)? = nil
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.headline)
-            if items.isEmpty {
-                EmptyPanelText("No items returned. Try Deep Scan or disable System Data for a faster map refresh.")
-            } else {
-                List(items, selection: Binding(
-                    get: { selectedItem?.id },
-                    set: { id in selectedItem = items.first { $0.id == id } }
-                )) { item in
-                    HStack {
-                        ItemRow(item: item)
-                        if item.isDir, let onOpen {
-                            Button {
-                                onOpen(item)
-                            } label: {
-                                Image(systemName: "arrow.right.circle")
-                            }
-                            .buttonStyle(.plain)
-                            .help("Open folder")
-                            .accessibilityIdentifier("items.open.\(item.path)")
-                        }
-                        Button {
-                            revealInFinder(item.path)
-                        } label: {
-                            Image(systemName: "finder")
-                        }
-                        .buttonStyle(.plain)
-                        .help("Reveal in Finder")
-                        .accessibilityLabel("Reveal \(item.name) in Finder")
-                        .accessibilityIdentifier("items.reveal.\(item.path)")
-                    }
-                    .tag(item.id)
-                    .onTapGesture(count: 2) {
-                        if item.isDir {
-                            onOpen?(item)
-                        }
-                    }
-                }
-                .scrollContentBackground(.hidden)
-                .listStyle(.inset)
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).font(.headline)
+            if items.isEmpty { EmptyPanelText("No items returned. Run a scan to explore storage.") }
+            ForEach(items) { item in
+                MapItemRow(item: item, isSelected: selectedItem?.id == item.id,
+                           onSelect: { selectedItem = item }, onOpen: { onOpen?(item) })
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 300)
-        .aeroSurface()
+        .padding(16).aeroSurface()
     }
 }
 
@@ -1507,126 +1310,76 @@ struct CandidateList: View {
     let onClean: () -> Void
     var onOpen: ((AppScanItem) -> Void)? = nil
     @State private var confirmingClean = false
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Cleanup Review")
-                    .font(.title2.bold())
-                Spacer()
-                Text(formatBytes(selectedTotal))
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
-                Button {
-                    onSelectSafe()
-                } label: {
-                    Label("Select Safe", systemImage: "checkmark.circle")
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(selectedPaths.count) selected").font(.headline)
+                    Text(formatBytes(selectedTotal)).foregroundStyle(.secondary).monospacedDigit()
                 }
-                Button {
-                    onClear()
-                } label: {
-                    Label("Clear", systemImage: "xmark.circle")
-                }
-                Button {
-                    onPreflight { passed in
-                        if passed {
-                            confirmingClean = true
-                        }
-                    }
-                } label: {
-                    Label("Move to Trash", systemImage: "trash")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(selectedPaths.isEmpty || isCleaning)
-                .confirmationDialog(
-                    "Move selected items to Trash?",
-                    isPresented: $confirmingClean,
-                    titleVisibility: .visible
-                ) {
-                    Button("Move to Trash", role: .destructive) {
-                        onClean()
-                    }
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text("Selected items remain on disk in Trash and are recoverable through macclean History. Disk space is reclaimed only after Trash is emptied.")
-                }
-            }
+                Spacer(minLength: 8)
+                Button("Select Safe", action: onSelectSafe)
+                    .disabled(isCleaning || !items.contains { $0.safety == .safe && $0.canMoveToTrash })
+                Button("Clear", action: onClear).disabled(isCleaning || selectedPaths.isEmpty)
+                Button { onPreflight { confirmingClean = $0 } } label: { Label("Move to Trash", systemImage: "trash") }
+                    .buttonStyle(.borderedProminent).disabled(selectedPaths.isEmpty || isCleaning)
+                    .accessibilityIdentifier("cleanup.review")
+            }.padding(12).aeroSurface()
             if let message {
-                Text(message)
-                    .foregroundStyle(.secondary)
+                Text(message).font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             }
             if !outcomes.isEmpty {
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(Array(outcomes.prefix(6))) { outcome in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Image(systemName: outcome.moved ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                                .foregroundStyle(outcome.moved ? .green : .red)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(outcome.path)
-                                    .font(.caption.monospaced())
-                                    .lineLimit(1)
-                                if let trashPath = outcome.trashPath {
-                                    Text("Trash: \(trashPath)")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                }
-                                if let error = outcome.error {
-                                    Text(error)
-                                        .font(.caption2)
-                                        .foregroundStyle(.red)
-                                }
-                            }
-                        }
-                    }
-                    if outcomes.count > 6 {
-                        Text("And \(outcomes.count - 6) more result(s) in History.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                DisclosureGroup("Cleanup results (\(outcomes.count))") {
+                    ForEach(outcomes) { outcome in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Label(outcome.path, systemImage: outcome.moved ? "checkmark.circle" : "exclamationmark.circle")
+                                .font(.caption).textSelection(.enabled)
+                            if let error = outcome.error { Text(error).font(.caption).foregroundStyle(.orange) }
+                        }.padding(.vertical, 4)
                     }
                 }
-                .padding(8)
-                .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 6))
             }
-            if items.isEmpty {
-                EmptyPanelText("No cleanable candidates in this scan. Use Deep Scan or scan a developer/project folder.")
-            } else {
-                List(items, selection: Binding(
-                    get: { selectedItem?.id },
-                    set: { id in selectedItem = items.first { $0.id == id } }
-                )) { item in
-                    HStack {
-                        Button {
-                            onToggle(item)
-                        } label: {
-                            Image(systemName: selectedPaths.contains(item.path) ? "checkmark.square.fill" : "square")
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(!item.canMoveToTrash)
-                        .help(item.canMoveToTrash ? "Include in cleanup" : "This item requires its dedicated CLI cleaner")
-                        ItemRow(item: item)
-                        if item.isDir {
-                            Button {
-                                onOpen?(item)
-                            } label: {
-                                Image(systemName: "arrow.right.circle")
+            if items.isEmpty { EmptyPanelText("No matching cleanup items. Refresh known caches or run a deeper scan.") }
+            LazyVStack(spacing: 8) {
+                ForEach(items) { item in
+                    let inspected = selectedItem?.id == item.id
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 10) {
+                            Button { onToggle(item) } label: {
+                                Image(systemName: selectedPaths.contains(item.path) ? "checkmark.square.fill" : "square")
+                                    .font(.title3).foregroundStyle(selectedPaths.contains(item.path) ? Color.accentColor : .secondary)
+                                    .frame(width: 28, height: 28).contentShape(Rectangle())
                             }
-                            .buttonStyle(.plain)
-                            .help("Open folder in MacClean")
+                            .buttonStyle(.plain).disabled(!item.canMoveToTrash || isCleaning)
+                            .accessibilityLabel("Include \(item.name) in cleanup")
+                            .accessibilityIdentifier("cleanup.select.\(item.path)")
+                            Button { selectedItem = inspected ? nil : item } label: {
+                                ItemRow(item: item).contentShape(Rectangle())
+                            }
+                                .buttonStyle(.plain).accessibilityIdentifier("cleanup.inspect.\(item.path)")
                         }
-                        Button {
-                            revealInFinder(item.path)
-                        } label: {
-                            Image(systemName: "finder")
+                        if inspected {
+                            Divider()
+                            Text(item.cleanupReason).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            Text(item.path).font(.caption.monospaced()).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                            HStack {
+                                if item.isDir, let onOpen {
+                                    Button { onOpen(item) } label: { Label("Open Folder", systemImage: "folder") }
+                                }
+                                Button { revealInFinder(item.path) } label: { Label("Reveal in Finder", systemImage: "finder") }
+                                if item.partial { Text("Size may be incomplete").font(.caption).foregroundStyle(.orange) }
+                            }
                         }
-                        .buttonStyle(.plain)
-                        .help("Reveal in Finder")
-                    }
-                    .tag(item.id)
+                    }.workspaceRow(selected: inspected)
                 }
-                .scrollContentBackground(.hidden)
-                .listStyle(.inset)
             }
+        }
+        .confirmationDialog("Move selected items to Trash?", isPresented: $confirmingClean, titleVisibility: .visible) {
+            Button("Move to Trash", role: .destructive, action: onClean)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Selected items are recoverable through History until Trash is emptied. Space is reclaimed after Trash is emptied.")
         }
     }
 }
@@ -1654,65 +1407,6 @@ struct ItemRow: View {
                 .frame(width: 92, alignment: .trailing)
         }
         .padding(.vertical, 3)
-    }
-}
-
-struct InspectorCard: View {
-    let item: AppScanItem?
-    var onOpen: ((AppScanItem) -> Void)? = nil
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Inspector")
-                .font(.headline)
-            if let item {
-                HStack {
-                    Image(systemName: item.isDir ? "folder" : "doc")
-                    Text(item.name)
-                        .font(.title3.bold())
-                        .lineLimit(1)
-                }
-                SafetyBadge(safety: item.safety)
-                DetailLine(label: "Size", value: formatBytes(item.sizeBytes))
-                DetailLine(label: "Kind", value: item.cleanKind)
-                DetailLine(label: "Action", value: item.cleanupAction)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Reason")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(item.cleanupReason)
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Path")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(item.path)
-                        .font(.caption)
-                        .textSelection(.enabled)
-                }
-                Spacer()
-                HStack {
-                    if item.isDir, let onOpen {
-                        Button {
-                            onOpen(item)
-                        } label: {
-                            Label("Open", systemImage: "arrow.right.circle")
-                        }
-                    }
-                    Button {
-                        revealInFinder(item.path)
-                    } label: {
-                        Label("Reveal", systemImage: "finder")
-                    }
-                }
-            } else {
-                Text("Select an item to inspect.")
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-        }
-        .padding(14)
-        .aeroSurface()
     }
 }
 
@@ -1764,7 +1458,7 @@ struct StorageTreemap: View {
                 if items.isEmpty {
                     EmptyPanelText("No map data")
                 } else {
-                    Canvas { context, size in
+                    Canvas(rendersAsynchronously: true) { context, size in
                         for (index, entry) in rects.enumerated() {
                             let isSelected = entry.item.id == selectedItem?.id
                             let isHovered = entry.item.id == hoveredItemID
@@ -1813,15 +1507,15 @@ struct StorageTreemap: View {
                     ForEach(rects, id: \.item.id) { entry in
                         Button {
                             selectedItem = entry.item
-                            if entry.item.isDir {
-                                onOpen?(entry.item)
-                            }
                         } label: {
                             Rectangle()
                                 .fill(.clear)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .simultaneousGesture(TapGesture(count: 2).onEnded {
+                            if entry.item.isDir { onOpen?(entry.item) }
+                        })
                         .frame(width: max(1, entry.rect.width), height: max(1, entry.rect.height))
                         .position(x: entry.rect.midX, y: entry.rect.midY)
                         .help(entry.item.isDir
@@ -1830,13 +1524,11 @@ struct StorageTreemap: View {
                         .accessibilityLabel(entry.item.name)
                         .accessibilityValue(formatBytes(entry.item.sizeBytes))
                         .accessibilityHint(entry.item.isDir
-                            ? "Opens this folder in the storage map"
+                            ? "Selects this folder; double-click to open"
                             : "Selects this file for inspection")
                         .accessibilityIdentifier("map.tile.\(entry.item.path)")
                         .onHover { hovering in
-                            withAnimation(.easeOut(duration: 0.16)) {
-                                hoveredItemID = hovering ? entry.item.id : nil
-                            }
+                            hoveredItemID = hovering ? entry.item.id : nil
                         }
                         .contextMenu {
                             if entry.item.isDir {
@@ -1854,7 +1546,7 @@ struct StorageTreemap: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .animation(.easeInOut(duration: 0.28), value: items.map(\.id))
+
     }
 }
 
@@ -1972,23 +1664,23 @@ struct SafetyLegend: View {
 struct BreadcrumbBar: View {
     let path: String
     let onNavigate: (String) -> Void
-
     var body: some View {
         let parts = breadcrumbParts(path)
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(parts) { part in
-                    Button {
-                        onNavigate(part.path)
-                    } label: {
-                        Text(part.label)
+        HStack(spacing: 6) {
+            if parts.count > 2 {
+                Menu {
+                    ForEach(parts.dropLast(2)) { part in
+                        Button(part.label) { onNavigate(part.path) }
                     }
-                    .buttonStyle(.borderless)
-                    if part.id != parts.last?.id {
-                        Image(systemName: "chevron.right")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
+                } label: { Image(systemName: "ellipsis") }
+                .menuStyle(.borderlessButton).frame(width: 20).help("Ancestor folders")
+            }
+            ForEach(Array(parts.suffix(2))) { part in
+                Button(part.label) { onNavigate(part.path) }
+                    .buttonStyle(.plain).lineLimit(1).truncationMode(.middle)
+                    .help(part.path).accessibilityIdentifier("map.breadcrumb.\(part.path)")
+                if part.id != parts.last?.id {
+                    Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
                 }
             }
         }
@@ -2106,4 +1798,60 @@ func compactBattery(_ battery: String) -> String {
 
 func revealInFinder(_ path: String) {
     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+}
+
+struct VersionsReviewView: View {
+    @ObservedObject var model: AppModel
+    @State private var search = ""
+    @State private var onlyRemovable = false
+    private var items: [AppScanItem] {
+        (model.versionReport?.entries ?? []).filter {
+            (!onlyRemovable || $0.removable) && (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search)
+                || $0.family.localizedCaseInsensitiveContains(search) || $0.path.localizedCaseInsensitiveContains(search))
+        }.map(\.cleanupItem)
+    }
+    var body: some View {
+        WorkspacePage {
+            WorkspaceHeading(title: "Versions Review", subtitle: "Review Rust, Node, Python, VS Code, and Cursor versions. Defaults and project pins are protected.")
+            HStack {
+                TextField("Additional project folder outside your home (optional)", text: $model.additionalVersionProjectRoot)
+                    .textFieldStyle(.roundedBorder).disabled(model.isLoadingVersions || model.isCleaning)
+                Button(model.versionReport == nil ? "Check Versions" : "Refresh") { model.loadVersions() }
+                    .disabled(model.isLoadingVersions || model.isCleaning)
+            }
+            Text("Checks standard rustup, nvm, and pyenv locations plus editor extension metadata. Home projects are always checked; add an external project folder if you use one. No versions are selected automatically.")
+                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if model.isLoadingVersions { ProgressView("Checking project pins and installed versions…") }
+            if let error = model.versionError { Text(error).foregroundStyle(.orange).textSelection(.enabled) }
+            if let report = model.versionReport {
+                DisclosureGroup("Checked \(report.checkedFiles) project/config files · \(report.complete ? "Coverage complete within scan scope" : "Incomplete coverage")") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(report.projectRoots, id: \.self) { Text($0).font(.caption.monospaced()).textSelection(.enabled) }
+                        Text("Generated folders, manager data, Library, Git data, and symlinked project folders are excluded. Usage outside these roots is unknown.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        ForEach(Array(report.warnings.enumerated()), id: \.offset) { _, warning in Text(warning).font(.caption).foregroundStyle(.orange) }
+                    }.padding(.top, 8)
+                }
+                HStack {
+                    TextField("Search versions or editors", text: $search).textFieldStyle(.roundedBorder)
+                    Toggle("Eligible only", isOn: $onlyRemovable).toggleStyle(.checkbox)
+                }
+                Text("\(report.entries.filter(\.removable).count) eligible · \(report.entries.filter { !$0.removable }.count) protected. Click a row to see the evidence.")
+                    .font(.callout).foregroundStyle(.secondary)
+                CandidateList(items: items, selectedItem: $model.selectedItem, selectedPaths: $model.selectedCleanupPaths,
+                              selectedTotal: model.selectedCleanupTotal(from: report.entries.map(\.cleanupItem)),
+                              isCleaning: model.isCleaning || model.isLoadingVersions,
+                              message: model.cleanupMessage, outcomes: model.cleanupOutcomes,
+                              onSelectSafe: { }, onClear: model.clearCleanupSelection, onToggle: model.toggleCleanup,
+                              onPreflight: model.preflightCleanup, onClean: model.cleanSelected, onOpen: model.openInMap)
+            } else if !model.isLoadingVersions {
+                EmptyPanelText("Check Versions to inventory installed versions and the projects that use them.")
+            }
+        }
+        .onAppear { model.clearCleanupSelection() }
+        .onChange(of: model.additionalVersionProjectRoot) { _ in
+            model.versionReport = nil
+            model.clearCleanupSelection()
+        }
+    }
 }

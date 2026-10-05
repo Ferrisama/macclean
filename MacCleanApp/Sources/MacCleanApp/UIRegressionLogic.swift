@@ -43,15 +43,22 @@ enum CleanupSelectionRules {
         guard isSelectable else { return selection }
         var result = selection
         if result.remove(path) == nil {
+            result = result.filter { !pathsOverlap($0, path) }
             result.insert(path)
         }
         return result
     }
 
     static func safeSelectablePaths(in items: [AppScanItem]) -> Set<String> {
-        Set(items.lazy
+        let paths = items.lazy
             .filter { $0.safety == .safe && $0.canMoveToTrash }
-            .map(\.path))
+            .map(\.path)
+            .sorted { $0.count < $1.count }
+        var selected = Set<String>()
+        for path in paths where !selected.contains(where: { pathsOverlap($0, path) }) {
+            selected.insert(path)
+        }
+        return selected
     }
 
     static func selectableRecipePaths(in recipe: CleanupRecipe) -> Set<String> {
@@ -68,6 +75,10 @@ enum CleanupSelectionRules {
             .filter { $0.error == nil }
             .map(\.path))
         return selection.intersection(eligible)
+    }
+
+    private static func pathsOverlap(_ first: String, _ second: String) -> Bool {
+        first == second || first.hasPrefix(second + "/") || second.hasPrefix(first + "/")
     }
 }
 

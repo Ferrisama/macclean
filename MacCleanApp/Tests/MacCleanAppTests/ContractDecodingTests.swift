@@ -2,6 +2,19 @@ import XCTest
 @testable import MacCleanApp
 
 final class ContractDecodingTests: XCTestCase {
+    func testVersionEvidenceDecodesAndProtectsBlockedEntries() throws {
+        let json = """
+        {"entries":[{"path":"/tmp/.nvm/versions/node/v18.0.0","name":"Node v18.0.0","family":"Node",
+        "version":"v18.0.0","size_bytes":100,"removable":false,"reasons":["Required by .nvmrc"]}],
+        "project_roots":["/tmp"],"checked_files":2,"complete":false,"warnings":["Incomplete coverage"]}
+        """
+        let report = try JSONDecoder.macclean.decode(InstalledVersionReport.self, from: Data(json.utf8))
+        XCTAssertEqual(report.checkedFiles, 2)
+        XCTAssertFalse(report.entries[0].cleanupItem.canMoveToTrash)
+        XCTAssertEqual(report.entries[0].cleanupItem.cleanupReason, "Required by .nvmrc")
+        XCTAssertFalse(report.complete)
+    }
+
     func testDuplicateReportDecodesBackendSnakeCaseContract() throws {
         let json = """
         {

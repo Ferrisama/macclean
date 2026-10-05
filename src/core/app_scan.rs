@@ -12,6 +12,7 @@ use crate::core::storage::{
 use crate::core::{CleanKind, RiskLevel};
 
 const RECIPE_ITEM_LIMIT: usize = 30;
+const CLEANUP_CANDIDATE_LIMIT: usize = 512;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppScanOptions {
@@ -179,12 +180,22 @@ where
     largest_items.truncate(options.limit);
 
     let mut cleanup_candidates = cleanup_candidates(&root_scan.tree, root_scan.tree.size_bytes);
+    let mut seen_paths: std::collections::HashSet<_> = cleanup_candidates
+        .iter()
+        .map(|item| item.path.clone())
+        .collect();
+    for node in &root_scan.discovered_cleanup {
+        if seen_paths.insert(node.path.clone()) {
+            cleanup_candidates.push(app_scan_item(node, root_scan.tree.size_bytes));
+        }
+    }
     cleanup_candidates.sort_by(|a, b| {
         safety_rank(a.safety)
             .cmp(&safety_rank(b.safety))
             .then_with(|| b.size_bytes.cmp(&a.size_bytes))
     });
-    cleanup_candidates.truncate(options.limit);
+    // Cleanup discovery is independent of the visible map's row/tile limit.
+    cleanup_candidates.truncate(CLEANUP_CANDIDATE_LIMIT);
 
     let safety_totals = safety_totals(&safety_items, root_scan.tree.size_bytes);
     let health = options.include_health.then(|| {
@@ -317,6 +328,9 @@ pub fn recipes() -> AppRecipes {
     ];
 
     let mut recipes: Vec<_> = definitions.into_iter().map(build_recipe).collect();
+    if let Some(home) = dirs::home_dir() {
+        recipes.push(editor_cache_recipe(&home));
+    }
     recipes.sort_by_key(|recipe| std::cmp::Reverse(recipe.total_bytes));
     AppRecipes {
         schema_version: 1,
@@ -334,6 +348,35 @@ struct RecipeDef {
     safety: StorageSafety,
     selected_by_default: bool,
     command: &'static str,
+}
+
+fn editor_cache_recipe(home: &std::path::Path) -> CleanupRecipe {
+    let mut items: Vec<_> = crate::core::cleanup_targets::editor_cache_paths(home)
+        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            let size_bytes = crate::core::fs::dir_size(&path);
+            (size_bytes > 0).then(|| RecipeItem {
+                label: path.strip_prefix(home).unwrap_or(&path).display().to_string(),
+                safety: storage::app_cleanup_safety(&path),
+                app_eligible: storage::app_cleanup_allowed(&path), path, size_bytes,
+                kind: CleanKind::Cache, risk: RiskLevel::Low, removable: true,
+                reason: "Regenerable VS Code cache or downloadable Codex runtime. Quit the relevant app first; settings and sessions are preserved.".into(),
+            })
+        }).collect();
+    items.sort_by_key(|item| std::cmp::Reverse(item.size_bytes));
+    CleanupRecipe {
+        id: "editor-caches".into(),
+        title: "Editor and Codex Caches".into(),
+        subtitle:
+            "Known VS Code caches and Codex runtimes; excludes settings, extensions, and sessions."
+                .into(),
+        safety: StorageSafety::Safe,
+        total_bytes: items.iter().map(|item| item.size_bytes).sum(),
+        item_count: items.len(),
+        items,
+        selected_by_default: false,
+        command: "app-trash (reviewed)".into(),
+    }
 }
 
 fn build_recipe(def: RecipeDef) -> CleanupRecipe {
@@ -433,7 +476,11 @@ fn app_scan_item(node: &StorageNode, root_size: u64) -> AppScanItem {
         partial: node.partial,
         safety: node.safety,
         clean_kind: node.clean_kind,
-        cleanup_action: node.cleanup_action.clone(),
+        cleanup_action: if storage::app_cleanup_allowed(&node.path) {
+            "Move to Trash".into()
+        } else {
+            node.cleanup_action.clone()
+        },
         cleanup_reason: node.cleanup_reason.clone(),
     }
 }
@@ -499,6 +546,73 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn hidden_project_output_and_editor_caches_are_exposed_but_user_data_is_not() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("Desktop/project");
+        let target = project.join("target");
+        fs::create_dir_all(target.join("debug/.fingerprint")).unwrap();
+        fs::create_dir_all(target.join("debug/deps")).unwrap();
+        fs::write(target.join("debug/deps/output"), vec![1; 1024]).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname='fixture'\nversion='0.1.0'\n",
+        )
+        .unwrap();
+        for relative in [
+            "Library/Application Support/Code/Cache",
+            "Library/Application Support/Code/User",
+            ".cache/codex-runtimes",
+            ".codex/sessions",
+        ] {
+            let path = dir.path().join(relative);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("fixture"), vec![2; 512]).unwrap();
+        }
+        let result = scan(AppScanOptions {
+            root: dir.path().to_path_buf(),
+            depth: 1,
+            limit: 1,
+            mode: ScanMode::Deep,
+            include_system_data: false,
+            include_health: false,
+        })
+        .unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let build = result
+            .cleanup_candidates
+            .iter()
+            .find(|item| item.path == root.join("Desktop/project/target"))
+            .expect("hidden Cargo target must survive the map's one-row limit");
+        assert_eq!(build.safety, StorageSafety::Review);
+        assert_eq!(build.cleanup_action, "Move to Trash");
+        for relative in [
+            "Library/Application Support/Code/Cache",
+            ".cache/codex-runtimes",
+        ] {
+            assert!(
+                result
+                    .cleanup_candidates
+                    .iter()
+                    .any(|item| item.path == root.join(relative)
+                        && item.safety == StorageSafety::Safe)
+            );
+        }
+        for relative in [
+            "Desktop/project",
+            "Library/Application Support/Code/User",
+            ".codex/sessions",
+        ] {
+            assert!(!result
+                .cleanup_candidates
+                .iter()
+                .any(|item| item.path == root.join(relative)));
+        }
+        let recipe = editor_cache_recipe(dir.path());
+        assert_eq!(recipe.items.len(), 2);
+        assert!(recipe.items.iter().all(|item| item.app_eligible));
+    }
+
+    #[test]
     fn app_scan_sorts_largest_items_and_candidates() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("Library/Caches/App")).unwrap();
@@ -535,5 +649,35 @@ mod tests {
             .iter()
             .any(|total| total.safety == StorageSafety::Safe && total.size_bytes > 0));
         assert!(scan.health.is_none());
+    }
+
+    #[test]
+    fn deep_scan_finds_hidden_cache_beyond_visible_depth_and_marks_it_reviewable() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("Library/Caches/HiddenApp");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("blob.bin"), vec![1u8; 4096]).unwrap();
+
+        let scan = scan(AppScanOptions {
+            root: dir.path().to_path_buf(),
+            depth: 1,
+            limit: 1,
+            mode: ScanMode::Deep,
+            include_system_data: false,
+            include_health: false,
+        })
+        .unwrap();
+
+        assert_eq!(scan.root_scan.tree.children.len(), 1);
+        assert!(scan.root_scan.tree.children[0].children.is_empty());
+        let expected_cache = dir.path().canonicalize().unwrap().join("Library/Caches");
+        let candidate = scan
+            .cleanup_candidates
+            .iter()
+            .find(|item| item.path == expected_cache)
+            .expect("hidden cache should be retained for cleanup review");
+        assert_eq!(candidate.safety, StorageSafety::Safe);
+        assert_eq!(candidate.cleanup_action, "Move to Trash");
+        assert!(candidate.size_bytes > 0);
     }
 }

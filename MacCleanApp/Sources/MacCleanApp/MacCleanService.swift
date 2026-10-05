@@ -230,6 +230,14 @@ final class MacCleanService {
         return try JSONDecoder.macclean.decode(AppRecipes.self, from: data)
     }
 
+    func versions(projects: [String]) async throws -> InstalledVersionReport {
+        let executable = try resolveBinary()
+        var arguments = ["app-versions"]
+        for root in projects { arguments.append(contentsOf: ["--projects", root]) }
+        return try JSONDecoder.macclean.decode(InstalledVersionReport.self,
+                                               from: await run(executable: executable, arguments: arguments))
+    }
+
     func installedApplications() async throws -> [InstalledApplication] {
         let executable = try resolveBinary()
         let data = try await run(executable: executable, arguments: ["app-uninstall-list"])
@@ -326,7 +334,8 @@ final class MacCleanService {
     func trash(
         paths: [String],
         reviewTokens: [String] = [],
-        dryRun: Bool = false
+        dryRun: Bool = false,
+        projects: [String] = []
     ) async throws -> AppTrashResponse {
         let executable = try resolveBinary()
         var arguments: [String] = []
@@ -338,6 +347,7 @@ final class MacCleanService {
         for token in reviewTokens {
             arguments.append(contentsOf: ["--review-token", token])
         }
+        for root in projects { arguments.append(contentsOf: ["--projects", root]) }
         let data = try await run(executable: executable, arguments: arguments)
         return try JSONDecoder.macclean.decode(AppTrashResponse.self, from: data)
     }

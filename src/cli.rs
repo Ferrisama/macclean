@@ -125,6 +125,11 @@ pub enum Commands {
     AppCache,
     #[command(name = "app-recipes")]
     AppRecipes,
+    #[command(name = "app-versions")]
+    AppVersions {
+        #[arg(long = "projects")]
+        projects: Vec<std::path::PathBuf>,
+    },
     #[command(name = "app-uninstall-list")]
     AppUninstallList,
     #[command(name = "app-uninstall-plan")]
@@ -148,6 +153,8 @@ pub enum Commands {
         paths: Vec<std::path::PathBuf>,
         #[arg(long = "review-token")]
         review_tokens: Vec<String>,
+        #[arg(long = "projects")]
+        projects: Vec<std::path::PathBuf>,
     },
     #[command(name = "app-dupes")]
     AppDupes {
@@ -408,6 +415,17 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
         ),
         Commands::AppCache => run_app_cache(),
         Commands::AppRecipes => run_app_recipes(),
+        Commands::AppVersions { projects } => {
+            let home = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&crate::core::versions::inspect(
+                    &home, &projects, true
+                ))?
+            );
+            Ok(())
+        }
         Commands::AppUninstallList => run_app_uninstall_list(),
         Commands::AppUninstallPlan { path, deep } => run_app_uninstall_plan(path, deep),
         Commands::AppHistory { limit } => run_app_history(limit),
@@ -415,7 +433,8 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
         Commands::AppTrash {
             paths,
             review_tokens,
-        } => run_app_trash(paths, review_tokens, dry_run),
+            projects,
+        } => run_app_trash(paths, review_tokens, dry_run, projects),
         Commands::AppDupes {
             path,
             min_mb,
@@ -877,6 +896,7 @@ fn run_app_trash(
     paths: Vec<std::path::PathBuf>,
     review_tokens: Vec<String>,
     dry_run: bool,
+    projects: Vec<std::path::PathBuf>,
 ) -> Result<()> {
     let reviewed_identities: Vec<_> = review_tokens
         .iter()
@@ -927,6 +947,18 @@ fn run_app_trash(
                 moved: false,
                 trash_path: None,
                 error: Some("Refusing app cleanup for an unclassified or protected path.".into()),
+                review_token: None,
+            });
+            continue;
+        }
+        if let Err(error) = crate::core::versions::validate(&resolved_path, &projects)
+            .and_then(|_| crate::core::cleanup_targets::validate_idle(&resolved_path))
+        {
+            response_outcomes.push(AppTrashItemOutcome {
+                path: resolved_path,
+                moved: false,
+                trash_path: None,
+                error: Some(error),
                 review_token: None,
             });
             continue;
@@ -1031,10 +1063,11 @@ fn run_app_trash(
                 }),
             }
         }
-        let result = crate::core::trash::trash_reviewed_clean_items_with_session(
+        let result = crate::core::trash::trash_reviewed_app_items_with_projects(
             "app-review",
             &executable_items,
             &executable_identities,
+            &projects,
         );
         (
             Some(result.session_id),

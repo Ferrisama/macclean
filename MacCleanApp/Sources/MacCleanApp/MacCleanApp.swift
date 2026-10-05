@@ -6,7 +6,7 @@ struct MacCleanApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
-                .frame(minWidth: 920, minHeight: 650)
+                .frame(minWidth: 860, minHeight: 600)
         }
         .windowStyle(.hiddenTitleBar)
     }
@@ -62,6 +62,10 @@ final class AppModel: ObservableObject {
     @Published var duplicateCleanupMessage: String?
     @Published var isCleaningDuplicates = false
     @Published var duplicateCleanupOutcomes: [DuplicateCleanupItemOutcome] = []
+    @Published var versionReport: InstalledVersionReport?
+    @Published var isLoadingVersions = false
+    @Published var versionError: String?
+    @Published var additionalVersionProjectRoot = ""
 
     private let service = MacCleanService()
     private var scanTask: Task<Void, Never>?
@@ -71,10 +75,28 @@ final class AppModel: ObservableObject {
     private var duplicateGeneration: UInt64 = 0
     private var duplicateJobID: UUID?
     private var cleanupReviewTokens: [String: String] = [:]
+    private var cleanupProjectRoots: [String] = []
     private var duplicateReviewTokens: [String: String] = [:]
     private var activeScanIsDeep = false
     private var activeScanDepth = 0
     private var activeScanLimit = 0
+    private var scansByPath: [String: AppScan] = [:]
+    private var scanOrder: [String] = []
+
+    private func rememberScan(_ result: AppScan) {
+        let key = result.rootScan.root
+        scansByPath[key] = result
+        scanOrder.removeAll { $0 == key }
+        scanOrder.append(key)
+        if scanOrder.count > 8 {
+            scansByPath.removeValue(forKey: scanOrder.removeFirst())
+        }
+    }
+
+    private func forgetScans() {
+        scansByPath.removeAll()
+        scanOrder.removeAll()
+    }
 
     func loadStartupData() {
         // Access is informational until the user chooses to configure it from
@@ -181,6 +203,7 @@ final class AppModel: ObservableObject {
                           !isScanning,
                           scanOwnership.activeJobID == nil else { return }
                     scan = cached
+                    rememberScan(cached)
                     path = cached.rootScan.root
                     directoryNavigation.reset(rootPath: cached.rootScan.root)
                     selectedItem = cached.largestItems.first
@@ -219,7 +242,37 @@ final class AppModel: ObservableObject {
         }
         path = requestedRoot
         directoryNavigation.reset(rootPath: requestedRoot)
+        forgetScans()
         refresh(fast: fast)
+    }
+
+    func scanHomeForSafeCleanup() {
+        scanCleanupScope(Self.initialPath, tab: .safe)
+    }
+
+    func loadVersions() {
+        guard !isLoadingVersions else { return }
+        clearCleanupSelection()
+        versionError = nil
+        isLoadingVersions = true
+        let extra = additionalVersionProjectRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            defer { isLoadingVersions = false }
+            do { versionReport = try await service.versions(projects: extra.isEmpty ? [] : [extra]) }
+            catch { versionError = error.localizedDescription; versionReport = nil }
+        }
+    }
+
+    func scanCleanupScope(_ root: String, tab: AppTab) {
+        path = root
+        directoryNavigation.reset(rootPath: path)
+        forgetScans()
+        scan = nil
+        selectedItem = nil
+        selectedCleanupPaths.removeAll()
+        cleanupReviewTokens.removeAll()
+        selectedTab = tab
+        refresh(fast: false)
     }
 
     func refresh(
@@ -273,8 +326,11 @@ final class AppModel: ObservableObject {
                 )
                 guard scanOwnership.accepts(ticket) else { return }
                 scan = result
-                selectedItem = result.largestItems.first
-                selectedCleanupPaths = selectedCleanupPaths.intersection(Set(result.cleanupCandidates.map(\.path)))
+                rememberScan(result)
+                selectedItem = selectedTab == .safe ? safeOpportunities().first : result.largestItems.first
+                let availablePaths = Set(result.cleanupCandidates.map(\.path))
+                    .union(recipes.flatMap { $0.items.filter(\.appEligible).map(\.path) })
+                selectedCleanupPaths.formIntersection(availablePaths)
                 scanStage = result.rootScan.partial ? "Complete (partial)" : "Complete"
                 scanProgress = 1.0
             } catch {
@@ -670,7 +726,24 @@ final class AppModel: ObservableObject {
         guard let target = transition(&next) else { return }
         directoryNavigation = next
         path = target
-        refresh(rollbackNavigation: previous)
+        if let cached = scansByPath[target] {
+            if let activeJobID = scanOwnership.activeJobID {
+                service.cancelScan(jobID: activeJobID)
+            }
+            scanOwnership.cancel()
+            scanTask?.cancel()
+            progressTask?.cancel()
+            scanTask = nil
+            progressTask = nil
+            isScanning = false
+            streamingItems = []
+            scan = cached
+            selectedItem = cached.largestItems.first
+            errorMessage = nil
+            scanStage = "Cached"
+        } else {
+            refresh(rollbackNavigation: previous)
+        }
     }
 
     func selectedCleanupTotal(in scan: AppScan) -> UInt64 {
@@ -679,6 +752,31 @@ final class AppModel: ObservableObject {
 
     func selectedCleanupTotalForRecipeOnly() -> UInt64 {
         selectedCleanupTotal(scanCandidates: [])
+    }
+
+    func selectedCleanupTotal(from items: [AppScanItem]) -> UInt64 {
+        items.filter { selectedCleanupPaths.contains($0.path) }
+            .reduce(UInt64(0)) { $0 &+ $1.sizeBytes }
+    }
+
+    func safeOpportunities() -> [AppScanItem] {
+        var byPath: [String: AppScanItem] = [:]
+        for recipe in recipes {
+            for item in recipe.items where item.appEligible && item.safety == .safe && item.path != "/dev/null" {
+                let candidate = AppScanItem(recipeItem: item, recipe: recipe)
+                if candidate.sizeBytes > (byPath[item.path]?.sizeBytes ?? 0) {
+                    byPath[item.path] = candidate
+                }
+            }
+        }
+        if let scan {
+            for item in scan.cleanupCandidates where item.safety == .safe && item.canMoveToTrash {
+                byPath[item.path] = item
+            }
+        }
+        return byPath.values.sorted {
+            $0.sizeBytes == $1.sizeBytes ? $0.path < $1.path : $0.sizeBytes > $1.sizeBytes
+        }
     }
 
     private func selectedCleanupTotal(scanCandidates: [AppScanItem]) -> UInt64 {
@@ -731,6 +829,15 @@ final class AppModel: ObservableObject {
         selectedCleanupPaths = CleanupSelectionRules.safeSelectablePaths(in: items)
     }
 
+    func retainSafeCleanupSelection() {
+        let visiblePaths = Set(safeOpportunities().map(\.path))
+        let retained = selectedCleanupPaths.intersection(visiblePaths)
+        if retained != selectedCleanupPaths {
+            cleanupReviewTokens.removeAll()
+            selectedCleanupPaths = retained
+        }
+    }
+
     func clearCleanupSelection() {
         cleanupReviewTokens.removeAll()
         selectedCleanupPaths.removeAll()
@@ -754,6 +861,7 @@ final class AppModel: ObservableObject {
         cleanupOutcomes = []
         let paths = Array(selectedCleanupPaths)
         let tokens = paths.compactMap { cleanupReviewTokens[$0] }
+        let projects = cleanupProjectRoots
         guard tokens.count == paths.count else {
             isCleaning = false
             cleanupMessage = "Cleanup review expired. Review the selected paths again."
@@ -761,7 +869,7 @@ final class AppModel: ObservableObject {
         }
         Task {
             do {
-                let response = try await service.trash(paths: paths, reviewTokens: tokens)
+                let response = try await service.trash(paths: paths, reviewTokens: tokens, projects: projects)
                 let failureDetail = response.outcomes
                     .compactMap(\.error)
                     .first
@@ -775,10 +883,12 @@ final class AppModel: ObservableObject {
                 selectedRecipe = nil
                 loadHistory()
                 loadRecipes()
+                forgetScans()
                 // The cached scan describes the files before the Trash move.
                 // Scan again so successfully removed candidates disappear
                 // instead of looking as though cleanup did nothing.
-                refresh(fast: !activeScanIsDeep)
+                if selectedTab == .versions { loadVersions() }
+                else { refresh(fast: !activeScanIsDeep) }
             } catch {
                 cleanupMessage = error.localizedDescription
             }
@@ -795,10 +905,12 @@ final class AppModel: ObservableObject {
         cleanupMessage = nil
         cleanupOutcomes = []
         let paths = Array(selectedCleanupPaths)
+        cleanupProjectRoots = versionReport?.projectRoots ?? []
+        let projects = cleanupProjectRoots
         Task {
             defer { isCleaning = false }
             do {
-                let response = try await service.trash(paths: paths, dryRun: true)
+                let response = try await service.trash(paths: paths, dryRun: true, projects: projects)
                 cleanupReviewTokens = Dictionary(uniqueKeysWithValues: response.outcomes.compactMap {
                     guard $0.error == nil, let token = $0.reviewToken else { return nil }
                     return ($0.path, token)
@@ -860,31 +972,64 @@ final class AppModel: ObservableObject {
 }
 
 struct RootView: View {
-    @StateObject private var model = AppModel()
+    @StateObject private var model: AppModel
+    private let loadsStartupData: Bool
+
+    @MainActor
+    init(model: AppModel? = nil, loadsStartupData: Bool = true) {
+        _model = StateObject(wrappedValue: model ?? AppModel())
+        self.loadsStartupData = loadsStartupData
+    }
 
     var body: some View {
-        NavigationSplitView {
-            List(AppTab.allCases, selection: $model.selectedTab) { tab in
-                Label(tab.title, systemImage: tab.icon)
-                    .tag(tab)
-                    .padding(.vertical, 4)
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 10) {
+                    Image(systemName: "externaldrive.fill").font(.title2).foregroundStyle(Color.accentColor)
+                    Text("MacClean").font(.title3.weight(.semibold))
+                }.padding(20)
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        sidebarSection("Storage", tabs: [.dashboard, .map, .safe, .duplicates])
+                        sidebarSection("Cleanup", tabs: [.clean, .developer, .temporary, .versions, .uninstall, .history])
+                        sidebarSection("System", tabs: [.monitor, .access])
+                    }.padding(.horizontal, 12).padding(.bottom, 16)
+                }.scrollIndicators(.visible)
             }
-            .scrollContentBackground(.hidden)
-            .background(.ultraThinMaterial)
-            .navigationTitle("MacClean")
-            .navigationSplitViewColumnWidth(min: 168, ideal: 190, max: 230)
-        } detail: {
-            ZStack {
-                AeroBackdrop()
-                VStack(spacing: 0) {
-                    ToolbarView(model: model)
-                    content
-                }
+            .frame(width: 190)
+            .background(Color(nsColor: .controlBackgroundColor))
+            Divider()
+            VStack(spacing: 0) {
+                ToolbarView(model: model)
+                Divider()
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .clipped()
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
         }
-        .tint(.cyan)
-        .task {
-            model.loadStartupData()
+        .tint(.accentColor)
+        .task { if loadsStartupData { model.loadStartupData() } }
+    }
+
+    private func sidebarSection(_ title: String, tabs: [AppTab]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                .padding(.leading, 10).padding(.bottom, 4)
+            ForEach(tabs) { tab in
+                Button { model.selectedTab = tab } label: {
+                    Label(tab.title, systemImage: tab.icon)
+                        .font(.callout.weight(model.selectedTab == tab ? .semibold : .regular))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10).padding(.vertical, 10)
+                        .foregroundStyle(model.selectedTab == tab ? Color.accentColor : Color.primary)
+                        .background(model.selectedTab == tab ? Color.accentColor.opacity(0.12) : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 8))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).accessibilityIdentifier("sidebar.\(tab.rawValue)")
+            }
         }
     }
 
@@ -893,6 +1038,8 @@ struct RootView: View {
         switch model.selectedTab {
         case .dashboard:
             DashboardView(model: model)
+        case .safe:
+            SafeCleanupView(model: model)
         case .map:
             MapView(model: model)
         case .duplicates:
@@ -901,6 +1048,10 @@ struct RootView: View {
             CleanReviewView(model: model)
         case .developer:
             DeveloperView(model: model)
+        case .temporary:
+            TemporaryBuildsView(model: model)
+        case .versions:
+            VersionsReviewView(model: model)
         case .monitor:
             MonitorView(model: model)
         case .history:
@@ -915,10 +1066,13 @@ struct RootView: View {
 
 enum AppTab: String, CaseIterable, Identifiable {
     case dashboard
+    case safe
     case map
     case duplicates
     case clean
     case developer
+    case temporary
+    case versions
     case monitor
     case history
     case uninstall
@@ -929,10 +1083,13 @@ enum AppTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .dashboard: "Dashboard"
+        case .safe: "Safe Cleanup"
         case .map: "Map"
         case .duplicates: "Duplicates"
         case .clean: "Clean"
         case .developer: "Developer"
+        case .temporary: "Temporary Builds"
+        case .versions: "Versions Review"
         case .monitor: "Monitor"
         case .history: "History"
         case .uninstall: "Uninstall"
@@ -943,10 +1100,13 @@ enum AppTab: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .dashboard: "gauge.with.dots.needle.67percent"
+        case .safe: "checkmark.shield"
         case .map: "square.grid.3x3"
         case .duplicates: "doc.on.doc"
         case .clean: "checklist"
         case .developer: "hammer"
+        case .temporary: "clock.arrow.circlepath"
+        case .versions: "shippingbox"
         case .monitor: "waveform.path.ecg"
         case .history: "clock.arrow.circlepath"
         case .uninstall: "app.badge"
@@ -959,109 +1119,57 @@ struct ToolbarView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 12) {
-                TextField("Path", text: $model.path)
+        VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "folder").foregroundStyle(.secondary)
+                TextField("Folder to scan", text: $model.path)
                     .textFieldStyle(.roundedBorder)
-                    .frame(minWidth: 420)
-                    .onSubmit {
-                        model.startRootScan()
-                    }
+                    .frame(minWidth: 120, maxWidth: .infinity)
+                    .onSubmit { model.startRootScan() }
                     .accessibilityIdentifier("toolbar.path")
-
-                Button {
-                    model.chooseScanFolder()
-                } label: {
-                    Label("Choose Folder", systemImage: "folder")
-                }
-                .disabled(model.isScanning)
-                .accessibilityIdentifier("toolbar.chooseFolder")
-
-                Button {
-                    model.revealCurrentPath()
-                } label: {
-                    Image(systemName: "finder")
-                }
-                .help("Reveal the current path in Finder")
-                .accessibilityLabel("Reveal current path in Finder")
-                .accessibilityIdentifier("toolbar.revealPath")
-
-                Spacer()
+                Button { model.chooseScanFolder() } label: { Image(systemName: "folder.badge.plus") }
+                    .disabled(model.isScanning).help("Choose a folder")
+                    .accessibilityLabel("Choose Folder").accessibilityIdentifier("toolbar.chooseFolder")
+                Button { model.revealCurrentPath() } label: { Image(systemName: "finder") }
+                    .help("Reveal the current folder in Finder")
+                    .accessibilityLabel("Reveal current path in Finder").accessibilityIdentifier("toolbar.revealPath")
+                Button { model.startRootScan() } label: { Label("Scan", systemImage: "bolt.fill") }
+                    .buttonStyle(.borderedProminent).disabled(model.isScanning)
+                    .help("Fast Scan").accessibilityIdentifier("toolbar.fastScan")
+                Menu {
+                    Button("Deep Scan") { model.startRootScan(fast: false) }
+                        .disabled(model.isScanning).accessibilityIdentifier("toolbar.deepScan")
+                    Divider()
+                    Toggle("Include System Data", isOn: $model.includeSystemData)
+                    Toggle("Include Health", isOn: $model.includeHealth)
+                } label: { Image(systemName: "ellipsis") }
+                .menuStyle(.borderlessButton).frame(width: 24)
+                .help("Scan options").accessibilityLabel("Scan options")
             }
-
-            HStack(spacing: 12) {
-
-                Toggle("System Data", isOn: $model.includeSystemData)
-                Toggle("Health", isOn: $model.includeHealth)
-
-                Button {
-                    model.startRootScan()
-                } label: {
-                    Label("Fast Scan", systemImage: "bolt.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(model.isScanning)
-                .accessibilityIdentifier("toolbar.fastScan")
-
-                Button {
-                    model.startRootScan(fast: false)
-                } label: {
-                    Label("Deep Scan", systemImage: "magnifyingglass")
-                }
-                .disabled(model.isScanning)
-                .accessibilityIdentifier("toolbar.deepScan")
-
+            HStack(spacing: 8) {
                 if model.isScanning {
-                    Button {
-                        model.cancelScan()
-                    } label: {
-                        Label("Stop", systemImage: "stop.fill")
-                    }
+                    ProgressView(value: model.scanProgress).frame(width: 100)
+                    Text(model.scanStage).lineLimit(1)
+                    Text("\(model.scanElapsedSeconds)s").monospacedDigit()
+                    Button("Stop", action: model.cancelScan).accessibilityIdentifier("toolbar.stop")
+                } else if let error = model.errorMessage {
+                    Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                    Text(error).lineLimit(1).help(error)
+                } else {
+                    Image(systemName: "checkmark.circle").foregroundStyle(.secondary)
+                    Text(model.scan == nil ? "Ready to scan" : "\(model.scanStage) • \(formatBytes(model.scan?.rootScan.tree.sizeBytes ?? 0))")
                 }
-
-                Spacer()
-            }
-
-            if model.fullDiskAccessStatus == .denied {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.shield")
-                        .foregroundStyle(.orange)
-                    Text(model.fullDiskAccessStatus.detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Button("Open Full Disk Access") {
-                        model.openFullDiskAccessSettings()
-                    }
-                    .buttonStyle(.link)
-                    Spacer()
+                Spacer(minLength: 8)
+                if model.fullDiskAccessStatus == .denied {
+                    Button { model.selectedTab = .access } label: { Label("Limited Access", systemImage: "lock.shield") }
+                        .buttonStyle(.plain).foregroundStyle(.orange)
+                        .help(model.fullDiskAccessStatus.detail)
                 }
             }
-
-            if model.isScanning {
-                HStack(spacing: 10) {
-                    ProgressView(value: model.scanProgress)
-                        .frame(width: 220)
-                    Text(model.scanStage)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("\(model.scanElapsedSeconds)s")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    if model.includeSystemData {
-                        Text("System Data can slow scans")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
-                    Spacer()
-                }
-            }
+            .font(.caption).foregroundStyle(.secondary)
+            .frame(height: 22)
         }
-        .padding(12)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(.white.opacity(0.1))
-                .frame(height: 1)
-        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }

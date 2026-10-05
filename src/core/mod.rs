@@ -1,4 +1,5 @@
 pub mod app_scan;
+pub mod cleanup_targets;
 pub mod cmd;
 pub mod fs;
 pub mod history;
@@ -8,6 +9,7 @@ pub mod profile;
 pub mod safety;
 pub mod storage;
 pub mod trash;
+pub mod versions;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

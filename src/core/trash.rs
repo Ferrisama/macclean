@@ -53,7 +53,7 @@ pub struct TrashItemResult {
 /// Performs a Trash-backed cleanup and returns the durable session identifier
 /// used for its receipt and History records.
 pub fn trash_clean_items_with_session(cleaner: &str, items: &[CleanItem]) -> TrashCleanResult {
-    trash_clean_items_impl(cleaner, items, None)
+    trash_clean_items_impl(cleaner, items, None, &[])
 }
 
 /// Executes a cleanup whose targets were previously reviewed by the app.
@@ -64,13 +64,23 @@ pub fn trash_reviewed_clean_items_with_session(
     items: &[CleanItem],
     identities: &[safety::FileIdentity],
 ) -> TrashCleanResult {
-    trash_clean_items_impl(cleaner, items, Some(identities))
+    trash_clean_items_impl(cleaner, items, Some(identities), &[])
+}
+
+pub fn trash_reviewed_app_items_with_projects(
+    cleaner: &str,
+    items: &[CleanItem],
+    identities: &[safety::FileIdentity],
+    projects: &[PathBuf],
+) -> TrashCleanResult {
+    trash_clean_items_impl(cleaner, items, Some(identities), projects)
 }
 
 fn trash_clean_items_impl(
     cleaner: &str,
     items: &[CleanItem],
     identities: Option<&[safety::FileIdentity]>,
+    projects: &[PathBuf],
 ) -> TrashCleanResult {
     let session_id = history::new_session_id(cleaner);
     let mut outcomes = Vec::new();
@@ -91,6 +101,17 @@ fn trash_clean_items_impl(
         } else {
             safety::validate_removal(&path).err()
         };
+        let preflight_error = preflight_error.or_else(|| {
+            if cleaner != "app-review" {
+                return None;
+            }
+            if !crate::core::storage::app_cleanup_allowed(&path) {
+                return Some("Cleanup classification changed; refresh and review again.".into());
+            }
+            crate::core::versions::validate(&path, projects)
+                .and_then(|_| crate::core::cleanup_targets::validate_idle(&path))
+                .err()
+        });
         if let Some(error) = preflight_error {
             receipt_items.push(receipt_item(item, "trash", "failed", Some(&error), None));
             outcomes.push(TrashItemResult {

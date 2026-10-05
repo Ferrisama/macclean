@@ -85,6 +85,50 @@ final class UIRegressionLogicTests: XCTestCase {
         XCTAssertEqual(CleanupSelectionRules.safeSelectablePaths(in: items), ["/safe"])
     }
 
+    func testBulkSafeSelectionAvoidsOverlappingFolders() {
+        let items = [
+            scanItem(path: "/Library/Caches/App", safety: .safe, action: "Move to Trash"),
+            scanItem(path: "/Library/Caches", safety: .safe, action: "Move to Trash"),
+            scanItem(path: "/Library/CachesMore", safety: .safe, action: "Move to Trash")
+        ]
+
+        XCTAssertEqual(
+            CleanupSelectionRules.safeSelectablePaths(in: items),
+            ["/Library/Caches", "/Library/CachesMore"]
+        )
+        XCTAssertEqual(
+            CleanupSelectionRules.toggling(
+                path: "/Library/Caches/App",
+                isSelectable: true,
+                in: ["/Library/Caches"]
+            ),
+            ["/Library/Caches/App"]
+        )
+    }
+
+    @MainActor
+    func testSafeOpportunitiesAreDeduplicatedAndSortedBySize() {
+        let model = AppModel()
+        model.recipes = [CleanupRecipe(
+            id: "cache",
+            title: "Cache",
+            subtitle: "",
+            safety: .safe,
+            totalBytes: 30,
+            itemCount: 4,
+            selectedByDefault: false,
+            command: "cache",
+            items: [
+                recipeItem(path: "/small", removable: true, appEligible: true, sizeBytes: 10),
+                recipeItem(path: "/large", removable: true, appEligible: true, sizeBytes: 30),
+                recipeItem(path: "/large", removable: true, appEligible: true, sizeBytes: 20),
+                recipeItem(path: "/blocked", removable: true, appEligible: false, sizeBytes: 100)
+            ]
+        )]
+
+        XCTAssertEqual(model.safeOpportunities().map(\.path), ["/large", "/small"])
+    }
+
     func testRecipeSelectionOnlyIncludesAppEligibleRemovablePaths() {
         let recipe = CleanupRecipe(
             id: "cache",
@@ -186,12 +230,13 @@ final class UIRegressionLogicTests: XCTestCase {
     private func recipeItem(
         path: String,
         removable: Bool,
-        appEligible: Bool
+        appEligible: Bool,
+        sizeBytes: UInt64 = 10
     ) -> RecipeItem {
         RecipeItem(
             label: URL(fileURLWithPath: path).lastPathComponent,
             path: path,
-            sizeBytes: 10,
+            sizeBytes: sizeBytes,
             kind: "cache",
             risk: "safe",
             reason: "test",

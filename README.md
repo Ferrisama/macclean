@@ -67,10 +67,21 @@ storage exploration and recoverable cleanup. It currently provides:
 
 - Fast and Deep scans with streamed progress, cancellation, cached startup,
   partial-coverage reporting, and safety classification.
-- A responsive glass-style storage map with proportional rounded tiles,
+- A Safe Cleanup screen that lists eligible caches by size, combines known
+  recipes with scan findings, and finds candidates below the visible map depth.
+- A responsive storage map with proportional rounded tiles,
   hover/selection feedback, Finder actions, and compact/large-window layouts.
+- Consistent page scrolling, inline cleanup details, and a scrollable app-review
+  sheet. Single-click map tiles to inspect; double-click folders to open them.
 - Reversible directory navigation with Back, Forward, Parent, scan-root,
-  clickable breadcrumb, and failed-navigation rollback controls.
+  clickable breadcrumb, cached revisits, and failed-navigation rollback controls.
+- Developer Cleanup for verified Cargo project output and a Temporary Builds
+  screen for owned Cargo targets in `/private/tmp`, with manual selection and
+  activity checks before Trash.
+- Known VS Code and Codex runtime caches with settings and sessions excluded.
+- Versions Review for standard rustup, nvm, and pyenv installs and obsolete
+  VS Code/Cursor extension copies, with default, project-pin, editor-profile,
+  and open-file checks before reviewed Trash removal.
 - Cleanup recipes and scan candidates that are reviewed before selected paths
   move to Trash.
 - Content-verified duplicate groups with explicit keeper selection, immediate
@@ -107,6 +118,11 @@ only and is not suitable for distributing the app to other users.
 Fast Scan sizes the selected folder's immediate children for a useful overview. Deep Scan explicitly traverses the requested depth. Both report incomplete coverage instead of presenting partial totals as complete.
 
 ### Beta verification
+
+Run the combined app checks on macOS with `./scripts/test-app.sh`. Follow the
+[native app testing guide](docs/APP_TESTING.md) for a human window pass.
+Run `./scripts/test-ui.sh` in a logged-in macOS session for rendered native
+click and scroll checks, with screenshots in `dist/ui-snapshots/`.
 
 ```bash
 cargo fmt --check

@@ -12,6 +12,7 @@ use crate::core::fs::dir_size;
 use crate::core::CleanKind;
 
 const FAST_SCAN_BUDGET: Duration = Duration::from_secs(8);
+const DISCOVERED_CANDIDATE_LIMIT: usize = 512;
 type ScanProgressCallback<'a> = dyn Fn(&Path, u64, bool, usize, usize) + Sync + 'a;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +36,11 @@ pub struct StorageScan {
     #[serde(default)]
     pub metrics: ScanMetrics,
     pub tree: StorageNode,
+    /// Deep scans retain top cleanup roots even when presentation depth or
+    /// row limits omit them from the visible tree. AppScan exposes these in
+    /// its own candidate list; tree scans keep their existing JSON contract.
+    #[serde(skip)]
+    pub discovered_cleanup: Vec<StorageNode>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -133,6 +139,7 @@ pub fn scan_tree_with_progress(
         bail!("Path does not exist: {}", root.display());
     }
     let start = Instant::now();
+    let mut discovered_cleanup = Vec::new();
     let (mut tree, metrics) = if mode == ScanMode::Fast {
         let tree = build_fast_tree(
             &root,
@@ -152,7 +159,14 @@ pub fn scan_tree_with_progress(
             implementation: "single-pass".into(),
             ..ScanMetrics::default()
         };
-        let tree = build_single_pass_tree(&root, depth, limit, progress, &mut metrics)?;
+        let tree = build_single_pass_tree(
+            &root,
+            depth,
+            limit,
+            progress,
+            &mut metrics,
+            &mut discovered_cleanup,
+        )?;
         (tree, metrics)
     };
     set_child_percentages(&mut tree);
@@ -170,6 +184,7 @@ pub fn scan_tree_with_progress(
         }),
         metrics,
         tree,
+        discovered_cleanup,
     })
 }
 
@@ -260,6 +275,7 @@ fn build_single_pass_tree(
     limit: usize,
     progress: Option<&ScanProgressCallback<'_>>,
     metrics: &mut ScanMetrics,
+    discovered_cleanup: &mut Vec<StorageNode>,
 ) -> Result<StorageNode> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     metrics.entries_seen = metrics.entries_seen.saturating_add(1);
@@ -282,6 +298,10 @@ fn build_single_pass_tree(
 
     metrics.directories_seen = metrics.directories_seen.saturating_add(1);
     let mut root_node = classified_node(&root, 0, true, false);
+    let root_is_candidate = matches!(
+        root_node.safety,
+        StorageSafety::Safe | StorageSafety::Review
+    );
     let entries: Vec<_> = match fs::read_dir(&root) {
         Ok(entries) => entries.collect(),
         Err(_) => {
@@ -306,6 +326,8 @@ fn build_single_pass_tree(
             visible_depth.saturating_sub(1),
             limit,
             metrics,
+            discovered_cleanup,
+            root_is_candidate,
         )?;
         root_node.size_bytes = root_node.size_bytes.saturating_add(child.size_bytes);
         root_node.partial |= child.partial;
@@ -333,6 +355,8 @@ fn single_pass_node(
     visible_depth: usize,
     limit: usize,
     metrics: &mut ScanMetrics,
+    discovered_cleanup: &mut Vec<StorageNode>,
+    covered_by_candidate: bool,
 ) -> Result<StorageNode> {
     metrics.entries_seen = metrics.entries_seen.saturating_add(1);
     let metadata = match fs::symlink_metadata(path) {
@@ -345,16 +369,16 @@ fn single_pass_node(
     let is_dir = metadata.file_type().is_dir();
     if !is_dir {
         metrics.files_seen = metrics.files_seen.saturating_add(1);
-        return Ok(classified_node(
-            path,
-            allocated_size(&metadata),
-            false,
-            false,
-        ));
+        let node = classified_node(path, allocated_size(&metadata), false, false);
+        if !covered_by_candidate && is_cleanup_candidate(&node) {
+            record_discovered_candidate(discovered_cleanup, &node);
+        }
+        return Ok(node);
     }
 
     metrics.directories_seen = metrics.directories_seen.saturating_add(1);
     let mut node = classified_node(path, 0, true, false);
+    let captures_candidate = !covered_by_candidate && is_cleanup_candidate(&node);
     let read_dir = match fs::read_dir(path) {
         Ok(entries) => entries,
         Err(_) => {
@@ -379,6 +403,8 @@ fn single_pass_node(
             visible_depth.saturating_sub(1),
             limit,
             metrics,
+            discovered_cleanup,
+            covered_by_candidate || captures_candidate,
         )?;
         node.size_bytes = node.size_bytes.saturating_add(child.size_bytes);
         node.partial |= child.partial;
@@ -389,7 +415,33 @@ fn single_pass_node(
     retained_children.sort_by_key(|child| std::cmp::Reverse(child.size_bytes));
     retained_children.truncate(limit);
     node.children = retained_children;
+    if captures_candidate && node.size_bytes > 0 {
+        record_discovered_candidate(discovered_cleanup, &node);
+    }
     Ok(node)
+}
+
+fn is_cleanup_candidate(node: &StorageNode) -> bool {
+    matches!(node.safety, StorageSafety::Safe | StorageSafety::Review)
+}
+
+fn record_discovered_candidate(items: &mut Vec<StorageNode>, node: &StorageNode) {
+    if node.size_bytes == 0 {
+        return;
+    }
+    let mut candidate = node.clone();
+    candidate.children.clear();
+    if items.len() < DISCOVERED_CANDIDATE_LIMIT {
+        items.push(candidate);
+    } else if let Some((smallest_index, smallest)) = items
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, item)| item.size_bytes)
+    {
+        if candidate.size_bytes > smallest.size_bytes {
+            items[smallest_index] = candidate;
+        }
+    }
 }
 
 // Kept temporarily for system-data helpers that still use bounded sizing.
@@ -823,6 +875,26 @@ fn classify_storage_path(path: &Path, is_dir: bool) -> StorageClassification {
             CleanKind::Unknown,
             "Do not clean automatically.",
             "System-owned or security-sensitive location.",
+        )
+    } else if crate::core::versions::managed_home(path).is_some() {
+        (StorageSafety::Review, CleanKind::DevArtifact, "Review installed version.",
+         "Installed toolchain or extension. Versions Review checks defaults, editor registrations, and project pins before allowing removal.")
+    } else if crate::core::versions::is_manager_data(path) {
+        (StorageSafety::Protected, CleanKind::DevArtifact, "Open Versions Review.",
+         "Version manager roots, extensions roots, and internal files are protected; review individual versions.")
+    } else if crate::core::cleanup_targets::is_rust_build(path) {
+        (
+            StorageSafety::Review,
+            CleanKind::DevArtifact,
+            "Review build output before moving to Trash.",
+            "Verified Cargo build output. Stop builds and tests first; rebuilding will take longer. Source files are outside this folder.",
+        )
+    } else if crate::core::cleanup_targets::is_editor_cache(path) {
+        (
+            StorageSafety::Safe,
+            CleanKind::Cache,
+            "Review cache before moving to Trash.",
+            "Known VS Code cache or downloadable Codex runtime cache. Quit the relevant app first; settings and sessions are excluded.",
         )
     } else if has_component_sequence(&components, &["library", "caches"])
         || has_component_sequence(&components, &[".npm"])

@@ -1,4 +1,29 @@
 import Foundation
+
+struct InstalledVersionReport: Codable {
+    let entries: [InstalledVersionEntry]
+    let projectRoots: [String]
+    let checkedFiles: Int
+    let complete: Bool
+    let warnings: [String]
+}
+
+struct InstalledVersionEntry: Codable, Identifiable {
+    var id: String { path }
+    let path: String
+    let name: String
+    let family: String
+    let version: String
+    let sizeBytes: UInt64
+    let removable: Bool
+    let reasons: [String]
+
+    var cleanupItem: AppScanItem {
+        AppScanItem(name: name, path: path, sizeBytes: sizeBytes, percentOfRoot: 0, isDir: true,
+                    partial: false, safety: removable ? .review : .protected, cleanKind: "dev artifact",
+                    cleanupAction: removable ? "Move to Trash" : "Inspect", cleanupReason: reasons.joined(separator: "\n"))
+    }
+}
 import SwiftUI
 
 enum StorageSafety: String, Codable, CaseIterable, Identifiable {
@@ -166,11 +191,13 @@ struct AppScanItem: Codable, Identifiable {
 
 extension AppScanItem {
     init(recipeItem: RecipeItem, recipe: CleanupRecipe) {
+        var directory = ObjCBool(false)
+        let exists = FileManager.default.fileExists(atPath: recipeItem.path, isDirectory: &directory)
         name = recipeItem.label
         path = recipeItem.path
         sizeBytes = recipeItem.sizeBytes
         percentOfRoot = 0
-        isDir = true
+        isDir = exists && directory.boolValue
         partial = false
         safety = recipeItem.safety
         cleanKind = recipeItem.kind
