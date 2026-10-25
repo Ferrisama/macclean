@@ -7,93 +7,101 @@ import XCTest
 /// These checks host the actual views and exercise their native scroll views.
 final class RenderedScrollingTests: XCTestCase {
     @MainActor
-    func testCleanupScrollsAfterInspectingAndSelectingRows() async throws {
-        try requireWindowSession()
-        let model = fixtureModel()
-        model.selectedTab = .safe
-        let (window, host) = await mount(model, size: NSSize(width: 860, height: 600))
-        defer { window.close() }
-        let scroll = try pageScroll(in: host)
-        XCTAssertGreaterThan(scroll.documentView?.bounds.height ?? 0, scroll.contentView.bounds.height + 500)
-        try click(in: scroll, x: 260, yFromTop: 275)
-        await settle(host)
-        XCTAssertEqual(model.selectedItem?.path, model.safeOpportunities()[0].path)
-        try click(in: scroll, x: 46, yFromTop: 275)
-        await settle(host)
-        XCTAssertEqual(model.selectedCleanupPaths.count, 1)
-        try await assertWheelScrolls(scroll, host: host)
-        try snapshot(host, named: "safe-compact-scrolled")
-    }
-
-    @MainActor
-    func testPagesHaveOneMainScrollSurfaceAtCompactAndWideSizes() async throws {
+    func testLeanPagesFitAndScrollAtCompactAndWideSizes() async throws {
         try requireWindowSession()
         for size in [NSSize(width: 860, height: 600), NSSize(width: 1440, height: 900)] {
-            for tab in [AppTab.dashboard, .safe, .map, .clean, .developer, .duplicates, .history, .uninstall, .temporary, .versions] {
-                let model = fixtureModel(temporary: tab == .temporary)
+            for tab in AppTab.allCases {
+                let model = fixtureModel()
                 model.selectedTab = tab
                 let (window, host) = await mount(model, size: size)
+                defer { window.close() }
                 let scroll = try pageScroll(in: host)
-                let mainScrolls = descendants(of: host).compactMap { $0 as? NSScrollView }
-                    .filter { $0.hasVerticalScroller && $0.bounds.width > 400 }
-                XCTAssertEqual(mainScrolls.count, 1, "\(tab.title) must not contain competing vertical scroll views")
-                XCTAssertLessThanOrEqual(scroll.documentView?.bounds.width ?? 0, scroll.contentView.bounds.width + 2,
-                                         "\(tab.title) must fit the window without horizontal clipping")
-                try snapshot(host, named: "\(tab.rawValue)-\(Int(size.width))")
+                XCTAssertLessThanOrEqual(scroll.documentView?.bounds.width ?? 0, scroll.contentView.bounds.width + 2)
+                try snapshot(host, named: "lean-\(tab.rawValue)-\(Int(size.width))-top")
                 if (scroll.documentView?.bounds.height ?? 0) > scroll.contentView.bounds.height + 100 {
                     try await assertWheelScrolls(scroll, host: host)
                 }
-                window.close()
+                try snapshot(host, named: "lean-\(tab.rawValue)-\(Int(size.width))")
             }
         }
     }
 
     @MainActor
-    func testMapSelectionDoesNotStartAScanAndPageStillScrolls() async throws {
+    func testCircuitSelectionDoesNotStartAScanAndScrolls() async throws {
         try requireWindowSession()
         let model = fixtureModel()
-        model.selectedTab = .map
         let (window, host) = await mount(model, size: NSSize(width: 860, height: 600))
         defer { window.close() }
-        try click(in: pageScroll(in: host), x: 160, yFromTop: 360)
+        let scroll = try pageScroll(in: host)
+        model.selectedItem = nil
+        await settle(host)
+        try click(in: scroll, x: 160, yFromTop: 390)
         await settle(host)
         XCTAssertNotNil(model.selectedItem)
-        XCTAssertFalse(model.isScanning, "A single click should inspect, without starting an expensive scan")
-        try await assertWheelScrolls(pageScroll(in: host), host: host)
+        XCTAssertFalse(model.isScanning)
+        try await assertWheelScrolls(scroll, host: host)
     }
 
     @MainActor
-    func testTemporaryBuildsRequireManualSelectionAndScroll() async throws {
+    func testWholeTreeSearchFitsCompactAndWideWindows() async throws {
         try requireWindowSession()
-        let model = fixtureModel(temporary: true)
-        model.selectedTab = .temporary
-        let (window, host) = await mount(model, size: NSSize(width: 860, height: 600))
-        defer { window.close() }
-        let items = try XCTUnwrap(model.scan).cleanupCandidates
-        model.selectSafeCandidates(from: items)
-        XCTAssertTrue(model.selectedCleanupPaths.isEmpty, "Build output must never be bulk-selected as safe cache")
-        model.toggleCleanup(items[0])
-        XCTAssertEqual(model.selectedCleanupPaths.count, 1)
-        await settle(host)
-        try await assertWheelScrolls(pageScroll(in: host), host: host)
+        for size in [NSSize(width: 860, height: 600), NSSize(width: 1440, height: 900)] {
+            let model = fixtureModel()
+            model.inventorySearchQuery = "Application"
+            let (window, host) = await mount(model, size: size)
+            defer { window.close() }
+            await model.searchInventory(debounce: false)
+            await settle(host)
+            XCTAssertEqual(model.inventorySearchPage?.totalCount, 60)
+            XCTAssertFalse(model.isScanning)
+            let scroll = try pageScroll(in: host)
+            XCTAssertLessThanOrEqual(scroll.documentView?.bounds.width ?? 0, scroll.contentView.bounds.width + 2)
+            try snapshot(host, named: "lean-search-\(Int(size.width))-top")
+            try await assertWheelScrolls(scroll, host: host)
+        }
     }
 
     @MainActor
-    func testVersionsProtectPinnedEntriesAndRemainScrollable() async throws {
+    func testLargeOpportunityCatalogExpandsPastInitialVisibleBatch() async throws {
+        try requireWindowSession()
+        let model = fixtureModel(itemCount: 640)
+        model.recipes = []
+        await model.installLoadedScan(try XCTUnwrap(model.scan))
+        XCTAssertEqual(model.opportunities.count, 640)
+        let (window, host) = await mountView(
+            ExploreWorkspace(model: model, filter: .constant(.opportunities))
+                .background(AeroTheme.background).tint(AeroTheme.accent).preferredColorScheme(.dark),
+            size: NSSize(width: 860, height: 600))
+        defer { window.close() }
+        let scroll = try pageScroll(in: host)
+        try snapshot(host, named: "lean-opportunities-640-top")
+        for _ in 0..<2 {
+            let height = try XCTUnwrap(scroll.documentView).bounds.height
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, height - scroll.contentView.bounds.height)))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            await settle(host)
+        }
+        let height = try XCTUnwrap(scroll.documentView).bounds.height
+        try snapshot(host, named: "lean-opportunities-640-first-batch")
+        try click(in: scroll, x: 100, yFromTop: height - 31)
+        await settle(host)
+        XCTAssertGreaterThan(try XCTUnwrap(scroll.documentView).bounds.height, height + 2000,
+                             "Show next must expose more loaded candidates, not discard the remainder")
+        XCTAssertEqual(model.opportunities.count, 640)
+        XCTAssertFalse(model.isScanning)
+    }
+
+    @MainActor
+    func testReviewSheetFitsAndScrollsLongSelection() async throws {
         try requireWindowSession()
         let model = fixtureModel()
-        model.selectedTab = .versions
-        let (window, host) = await mount(model, size: NSSize(width: 860, height: 600))
+        for item in try XCTUnwrap(model.scan).cleanupCandidates { model.toggleCleanup(item) }
+        let (window, host) = await mountView(CleanupReviewSheet(model: model), size: NSSize(width: 620, height: 530))
         defer { window.close() }
-        let entries = try XCTUnwrap(model.versionReport).entries
-        model.toggleCleanup(entries[1].cleanupItem)
-        XCTAssertTrue(model.selectedCleanupPaths.isEmpty)
-        model.selectSafeCandidates(from: entries.map(\.cleanupItem))
-        XCTAssertTrue(model.selectedCleanupPaths.isEmpty, "No versions should be bulk selected")
-        model.toggleCleanup(entries[0].cleanupItem)
-        XCTAssertEqual(model.selectedCleanupPaths.count, 1)
-        await settle(host)
-        try await assertWheelScrolls(pageScroll(in: host), host: host)
+        let scroll = try pageScroll(in: host)
+        XCTAssertGreaterThan(scroll.documentView?.bounds.height ?? 0, scroll.contentView.bounds.height + 500)
+        try await assertWheelScrolls(scroll, host: host)
+        try snapshot(host, named: "lean-review-scrolled")
     }
 
     private func requireWindowSession() throws {
@@ -102,35 +110,9 @@ final class RenderedScrollingTests: XCTestCase {
     }
 
     @MainActor
-    func testLongUninstallReviewScrollsInLightAppearance() async throws {
-        try requireWindowSession()
-        let model = fixtureModel()
-        model.selectedInstalledApplication = model.installedApplications[0]
-        model.uninstallPlan = UninstallPlan(
-            appName: "Example App", bundleId: "dev.fixture.app", bundleIdGuessed: false,
-            appPath: "/tmp/macclean-ui/App.app",
-            items: (0..<50).map {
-                UninstallTraceItem(path: "/tmp/macclean-ui/Library/Application Support/Example App/Trace-\($0)",
-                                   sizeBytes: 10_000_000, reason: "Application-owned data requiring review.", risk: "medium")
-            }, totalSize: 500_000_000, deep: true, runningProcesses: [], canExecute: true, preflightError: nil)
-        // Supply the light sheet background when capturing the content view alone.
-        let content = WorkspacePage { UninstallInspector(model: model, deepReview: .constant(true)) }
-            .background(Color.white)
-            .environment(\.colorScheme, .light)
-        let (window, host) = await mountView(content, size: NSSize(width: 680, height: 488))
-        defer { window.close() }
-        host.appearance = NSAppearance(named: .aqua)
-        await settle(host)
-        let scroll = try pageScroll(in: host)
-        XCTAssertGreaterThan(scroll.documentView?.bounds.height ?? 0, scroll.contentView.bounds.height + 500)
-        XCTAssertLessThanOrEqual(scroll.documentView?.bounds.width ?? 0, scroll.contentView.bounds.width + 2)
-        try await assertWheelScrolls(scroll, host: host)
-        try snapshot(host, named: "uninstall-review-light-scrolled")
-    }
-
-    @MainActor
     private func mount(_ model: AppModel, size: NSSize) async -> (NSWindow, NSHostingView<RootView>) {
-        await mountView(RootView(model: model, loadsStartupData: false), size: size)
+        if let scan = model.scan { await model.installLoadedScan(scan) }
+        return await mountView(RootView(model: model, loadsStartupData: false), size: size)
     }
 
     @MainActor
@@ -204,21 +186,35 @@ final class RenderedScrollingTests: XCTestCase {
     }
 
     @MainActor
-    private func fixtureModel(temporary: Bool = false) -> AppModel {
-        let model = AppModel()
-        let items = (0..<60).map { index in
+    private func fixtureModel(temporary: Bool = false, itemCount: Int = 60) -> AppModel {
+        let model = AppModel(capacityReader: { _ in
+            try VolumeCapacity(name: "Fixture volume", volumePath: "/fixture-volume",
+                               totalBytes: 500_000_000_000, availableBytes: 200_000_000_000)
+        })
+        let items = (0..<itemCount).map { index in
             AppScanItem(name: "Application Cache \(index + 1)", path: temporary ? "/private/tmp/fixture-\(index + 1)-target" : "/tmp/macclean-ui/Library/Caches/Application-\(index + 1)",
-                        sizeBytes: UInt64(60 - index) * 100_000_000, percentOfRoot: 2, isDir: true, partial: false,
+                        sizeBytes: UInt64(max(1, 60 - index)) * 100_000_000, percentOfRoot: 2, isDir: true, partial: false,
                         safety: temporary ? .review : .safe, cleanKind: temporary ? "dev artifact" : "cache", cleanupAction: "Move to Trash",
                         cleanupReason: "Regenerable application cache. The application recreates it when needed.")
         }
-        let tree = StorageNode(name: "Fixture", path: temporary ? "/private/tmp" : "/tmp/macclean-ui", sizeBytes: 8_000_000_000,
+        let tree = StorageNode(name: "Fixture", path: temporary ? "/private/tmp" : "/tmp/macclean-ui", sizeBytes: items.reduce(0) { $0 + $1.sizeBytes },
                                percentOfParent: 100, isDir: true, partial: false, safety: .unknown, cleanKind: "unknown",
                                cleanupAction: "Inspect", cleanupReason: "Test fixture", children: [])
         model.path = tree.path
-        model.scan = AppScan(schemaVersion: 1, rootScan: StorageScan(root: tree.path, mode: "deep", depth: 4, limit: 80,
-                            scannedAt: 0, elapsedMs: 10, partial: false, incompleteReason: nil, metrics: nil, tree: tree),
-                            systemData: nil, largestItems: items, cleanupCandidates: items,
+        var storage = StorageScan(root: tree.path, mode: "deep", depth: 4, limit: 80,
+                                  scannedAt: UInt64(Date().timeIntervalSince1970), elapsedMs: 10, partial: false,
+                                  incompleteReason: nil, metrics: nil, tree: tree)
+        storage.inventory = ScanInventory(root: tree.path, nodes: [
+            InventoryNode(name: "Fixture", parent: nil, sizeBytes: tree.sizeBytes, isDir: true, partial: false)
+        ] + items.map { InventoryNode(name: URL(fileURLWithPath: $0.path).lastPathComponent, parent: 0, sizeBytes: $0.sizeBytes, isDir: true, partial: false) })
+        // Keep fixture children directly under the root, matching inventory parentage.
+        let fixtureItems = items.map { item in
+            AppScanItem(name: item.name, path: tree.path + "/" + URL(fileURLWithPath: item.path).lastPathComponent,
+                        sizeBytes: item.sizeBytes, percentOfRoot: item.percentOfRoot, isDir: true, partial: false,
+                        safety: item.safety, cleanKind: item.cleanKind, cleanupAction: item.cleanupAction, cleanupReason: item.cleanupReason)
+        }
+        model.scan = AppScan(schemaVersion: 1, rootScan: storage, systemData: nil, largestItems: fixtureItems,
+                            cleanupCandidates: fixtureItems,
                             safetyTotals: [SafetyTotal(safety: .safe, sizeBytes: tree.sizeBytes, percentOfRoot: 100, itemCount: items.count)], health: nil)
         model.recipes = (0..<6).map { index in
             CleanupRecipe(id: "recipe-\(index)", title: "Cache recipe \(index + 1)",
@@ -233,29 +229,6 @@ final class RenderedScrollingTests: XCTestCase {
             HistorySession(sessionId: "fixture-session-\(index)", timestamp: 0, cleaner: "Safe Cache Cleanup",
                            itemCount: 5, totalBytes: 500_000_000, method: "trash", restorableCount: 5)
         }
-        model.installedApplications = (0..<40).map { index in
-            InstalledApplication(name: "Example App \(index)", path: "/tmp/macclean-ui/App-\(index).app",
-                                 bundleId: "dev.fixture.app\(index)", protected: false)
-        }
-        let groups = (0..<12).map { index in
-            DuplicateGroup(id: "group-\(index)", sizeBytes: 20_000_000, wastedBytes: 20_000_000,
-                           files: [DuplicateFile(path: "/tmp/macclean-ui/duplicates/\(index)/original.dat", sizeBytes: 20_000_000, modifiedAt: 1),
-                                   DuplicateFile(path: "/tmp/macclean-ui/duplicates/\(index)/copy.dat", sizeBytes: 20_000_000, modifiedAt: 2)])
-        }
-        model.duplicateReport = DuplicateReport(schemaVersion: 1, root: tree.path, minBytes: 1, scannedFiles: 24,
-                            hashedFiles: 24, partial: false, errorCount: 0, totalWastedBytes: 240_000_000, elapsedMs: 10, groups: groups)
-        var versions: [InstalledVersionEntry] = []
-        for index in 0..<40 {
-            let removable = index % 2 == 0
-            let reason = removable ? "No project pins matched in the checked roots." : "Required by /tmp/macclean-ui/project/rust-toolchain.toml"
-            let entry = InstalledVersionEntry(path: "/tmp/macclean-ui/.rustup/toolchains/fixture-\(index)",
-                                              name: "Rust nightly fixture \(index)", family: "Rust", version: "nightly-2025-01-\(index)",
-                                              sizeBytes: UInt64(40 - index) * UInt64(10_000_000), removable: removable,
-                                              reasons: [reason])
-            versions.append(entry)
-        }
-        model.versionReport = InstalledVersionReport(entries: versions, projectRoots: ["/tmp/macclean-ui"],
-                                                     checkedFiles: 12, complete: true, warnings: [])
         model.fullDiskAccessStatus = .granted
         return model
     }

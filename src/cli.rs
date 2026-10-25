@@ -125,6 +125,8 @@ pub enum Commands {
     AppCache,
     #[command(name = "app-recipes")]
     AppRecipes,
+    #[command(name = "app-caches")]
+    AppCaches,
     #[command(name = "app-versions")]
     AppVersions {
         #[arg(long = "projects")]
@@ -415,6 +417,15 @@ fn dispatch(cmd: Commands, dry_run: bool, yes: bool) -> Result<()> {
         ),
         Commands::AppCache => run_app_cache(),
         Commands::AppRecipes => run_app_recipes(),
+        Commands::AppCaches => {
+            let home = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&crate::core::cache_catalog::scan(&home))?
+            );
+            Ok(())
+        }
         Commands::AppVersions { projects } => {
             let home = dirs::home_dir()
                 .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
@@ -806,20 +817,33 @@ fn run_app_scan(
     } else {
         crate::core::app_scan::scan(options)?
     };
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     if emit_progress {
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({"type":"result", "data": scan}))?
-        );
+        #[derive(serde::Serialize)]
+        struct ResultEnvelope<'a> {
+            #[serde(rename = "type")]
+            kind: &'static str,
+            data: &'a crate::core::app_scan::AppScan,
+        }
+        serde_json::to_writer(
+            &mut out,
+            &ResultEnvelope {
+                kind: "result",
+                data: &scan,
+            },
+        )?;
     } else {
-        println!("{}", serde_json::to_string_pretty(&scan)?);
+        serde_json::to_writer(&mut out, &scan)?;
     }
+    writeln!(out)?;
+    out.flush()?;
     Ok(())
 }
 
 fn run_app_cache() -> Result<()> {
     if let Some(scan) = crate::core::app_scan::read_app_scan_cache()? {
-        println!("{}", serde_json::to_string_pretty(&scan)?);
+        serde_json::to_writer(std::io::stdout().lock(), &scan)?;
+        println!();
     } else {
         println!("null");
     }
@@ -883,6 +907,11 @@ fn run_app_restore(session: Option<String>) -> Result<()> {
         .filter(|outcome| outcome.restored)
         .count();
     let failed_count = response_outcomes.len().saturating_sub(restored_count);
+    if restored_count > 0 {
+        if let Err(error) = crate::core::app_scan::invalidate_scan_caches() {
+            eprintln!("Restore succeeded but cached scan invalidation failed: {error}");
+        }
+    }
     let response = AppRestoreResponse {
         restored_count,
         failed_count,
@@ -1120,6 +1149,11 @@ fn run_app_trash(
         reclaimed_bytes: 0,
         outcomes: response_outcomes,
     };
+    if moved_count > 0 {
+        if let Err(error) = crate::core::app_scan::invalidate_scan_caches() {
+            eprintln!("Cleanup succeeded but cached scan invalidation failed: {error}");
+        }
+    }
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }

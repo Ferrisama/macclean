@@ -78,7 +78,12 @@ fn open_paths(output: &str, root: &Path) -> bool {
 /// Run again immediately before moving a newly supported target to Trash.
 /// An unavailable activity check is a rejection, never permission to remove.
 pub fn validate_idle(path: &Path) -> Result<(), String> {
-    if !is_rust_build(path) && !is_editor_cache(path) {
+    let known_cache = dirs::home_dir().is_some_and(|home| {
+        crate::core::cache_catalog::rule_for_path(path, &home).is_some()
+            || (path.starts_with(home.join("Library/Caches"))
+                && path != home.join("Library/Caches"))
+    });
+    if !is_rust_build(path) && !is_editor_cache(path) && !known_cache {
         return Ok(());
     }
     if !owned_by_current_user(path) {

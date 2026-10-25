@@ -27,6 +27,17 @@ final class TreemapTests: XCTestCase {
         XCTAssertEqual(threeArea / oneArea, 3, accuracy: 0.001)
     }
 
+    func testSimilarWeightsRemainReadableInWideAndTallMaps() {
+        let items = (1...60).map { item("cache-\($0)", UInt64(61 - $0)) }
+        for bounds in [CGRect(x: 0, y: 0, width: 1000, height: 300), CGRect(x: 0, y: 0, width: 300, height: 1000)] {
+            let entries = treemapRects(items: items, in: bounds)
+            for entry in entries.prefix(40) {
+                let ratio = max(entry.rect.width / entry.rect.height, entry.rect.height / entry.rect.width)
+                XCTAssertLessThan(ratio, 4, "Large entries must not collapse into unreadable strips")
+            }
+        }
+    }
+
     private func item(_ name: String, _ size: UInt64) -> AppScanItem {
         AppScanItem(name: name, path: "/tmp/\(name)", sizeBytes: size, percentOfRoot: 0, isDir: true, partial: false, safety: .safe, cleanKind: "cache", cleanupAction: "Move to Trash", cleanupReason: "test")
     }

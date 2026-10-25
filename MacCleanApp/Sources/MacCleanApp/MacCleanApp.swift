@@ -16,8 +16,26 @@ struct MacCleanApp: App {
 final class AppModel: ObservableObject {
     private static let initialPath = FileManager.default.homeDirectoryForCurrentUser.path
 
+    @Published private(set) var loadedTree: LoadedTree?
+    @Published var inventorySearchQuery = ""
+    @Published var inventorySearchKind: InventorySearchKind = .all
+    @Published var inventorySearchSize: InventorySearchSize = .any
+    @Published var inventorySearchLimit = 100
+    @Published var inventorySearchPage: InventorySearchPage?
+    @Published var isSearchingInventory = false
+    var inventorySearchTicket = UUID()
+    @Published var volumeCapacity: VolumeCapacity?
+    @Published var volumeCapacityError: String?
+    @Published var isLoadingVolumeCapacity = false
+    var volumeCapacityTicket = UUID()
+    var volumeCapacitySourcePath: String?
+    let capacityReader: @Sendable (String) throws -> VolumeCapacity
+
+    init(capacityReader: @escaping @Sendable (String) throws -> VolumeCapacity = { try VolumeCapacity.read(at: $0) }) {
+        self.capacityReader = capacityReader
+    }
     @Published var scan: AppScan?
-    @Published var selectedTab: AppTab = .dashboard
+    @Published var selectedTab: AppTab = .map
     @Published var selectedItem: AppScanItem?
     @Published var path = AppModel.initialPath
     @Published private(set) var directoryNavigation = DirectoryNavigation(
@@ -40,43 +58,79 @@ final class AppModel: ObservableObject {
     @Published var scanStage = "Idle"
     @Published var scanProgress = 0.0
     @Published var recipes: [CleanupRecipe] = []
+    @Published var isFindingApps = false
+    @Published var folderActivity: [ApplicationActivity] = []
+    @Published var appActivity: [ApplicationActivity] = []
+    @Published var cacheItems: [AppScanItem] = []
+    @Published var cacheWarnings: [String] = []
     @Published var isLoadingRecipes = false
     @Published var selectedRecipe: CleanupRecipe?
     @Published var streamingItems: [AppScanItem] = []
     @Published var fullDiskAccessStatus: FullDiskAccessStatus = .checking
     @Published var accessCheckedLocations: [String] = []
     @Published var accessDeniedLocations: [String] = []
-    @Published var installedApplications: [InstalledApplication] = []
-    @Published var selectedInstalledApplication: InstalledApplication?
-    @Published var isLoadingInstalledApplications = false
-    @Published var uninstallListError: String?
-    @Published var uninstallPlan: UninstallPlan?
-    @Published var isLoadingUninstallPlan = false
-    @Published var uninstallPlanError: String?
-    @Published var duplicateReport: DuplicateReport?
-    @Published var isScanningDuplicates = false
-    @Published var duplicateError: String?
-    @Published var duplicateMinMB: UInt64 = 10
-    @Published var duplicateProgress: DuplicateScanProgress?
-    @Published var duplicateSelections: [String: DuplicateGroupSelection] = [:]
-    @Published var duplicateCleanupMessage: String?
-    @Published var isCleaningDuplicates = false
-    @Published var duplicateCleanupOutcomes: [DuplicateCleanupItemOutcome] = []
-    @Published var versionReport: InstalledVersionReport?
-    @Published var isLoadingVersions = false
-    @Published var versionError: String?
-    @Published var additionalVersionProjectRoot = ""
+    @Published var recentFolders: [RecentFolder] = RecentFolder.load()
+    @Published var collectedItems: [String: AppScanItem] = [:]
+
+    var busy: Bool { isScanning || isLoadingRecipes || isCleaning || isRestoring || isFindingApps }
+    var collection: [AppScanItem] {
+        selectedCleanupPaths.compactMap { collectedItems[$0] }.sorted { $0.path < $1.path }
+    }
+    var collectionBytes: UInt64 { collection.reduce(0) { $0 &+ $1.sizeBytes } }
+    var opportunities: [AppScanItem] {
+        // The immutable scan catalog is indexed/sorted off the main actor once.
+        if cacheItems.isEmpty, recipes.isEmpty, let loadedTree { return loadedTree.cleanupItems }
+        var byPath = Dictionary((scan?.cleanupCandidates ?? []).map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
+        for item in cacheItems { byPath[item.path] = item }
+        for recipe in recipes {
+            for item in recipe.items where item.removable && item.appEligible {
+                byPath[item.path] = AppScanItem(recipeItem: item, recipe: recipe)
+            }
+        }
+        return byPath.values.sorted { $0.sizeBytes == $1.sizeBytes ? $0.path < $1.path : $0.sizeBytes > $1.sizeBytes }
+    }
+
+    func rememberRecentFolder(_ path: String) {
+        recentFolders = RecentFolder.recording(path, in: recentFolders)
+        RecentFolder.save(recentFolders)
+    }
+
+    func openRecentFolder(_ folder: RecentFolder) {
+        guard !busy else { return }
+        path = folder.path
+        startRootScan()
+    }
+
+    func clearRecentFolders() {
+        recentFolders = []
+        RecentFolder.save([])
+    }
+
+    func loadAppActivity() async {
+        guard !busy else { return }
+        isFindingApps = true
+        defer { isFindingApps = false }
+        appActivity = await service.applicationActivity()
+    }
+
+    func loadFolderActivity() async {
+        guard !busy, let scan else { return }
+        isFindingApps = true
+        defer { isFindingApps = false }
+        folderActivity = await service.folderActivity(paths: mapItems(in: scan).filter(\.isDir).map(\.path))
+    }
+
+    func inspectUsage(_ item: AppScanItem) async -> ItemUsage {
+        await service.usage(path: item.path)
+    }
 
     private let service = MacCleanService()
     private var scanTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
+    private var cacheTask: Task<Void, Never>?
     private var scanOwnership = ScanGenerationOwnership()
-    private var duplicateTask: Task<Void, Never>?
-    private var duplicateGeneration: UInt64 = 0
-    private var duplicateJobID: UUID?
     private var cleanupReviewTokens: [String: String] = [:]
     private var cleanupProjectRoots: [String] = []
-    private var duplicateReviewTokens: [String: String] = [:]
     private var activeScanIsDeep = false
     private var activeScanDepth = 0
     private var activeScanLimit = 0
@@ -104,7 +158,6 @@ final class AppModel: ObservableObject {
         // repeatedly presenting this guidance is noisy and not actionable.
         checkFullDiskAccess()
         loadCachedScan()
-        loadRecipes()
     }
 
     func checkFullDiskAccess() {
@@ -142,66 +195,17 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 
-    func loadInstalledApplications() {
-        guard !isLoadingInstalledApplications else { return }
-        isLoadingInstalledApplications = true
-        uninstallListError = nil
-        Task {
-            do {
-                let apps = try await service.installedApplications()
-                installedApplications = apps
-                if let selectedInstalledApplication,
-                   !apps.contains(where: { $0.path == selectedInstalledApplication.path }) {
-                    self.selectedInstalledApplication = nil
-                }
-            } catch {
-                uninstallListError = error.localizedDescription
-            }
-            isLoadingInstalledApplications = false
-        }
-    }
-
-    func selectInstalledApplication(_ app: InstalledApplication?) {
-        guard selectedInstalledApplication?.path != app?.path else { return }
-        selectedInstalledApplication = app
-        uninstallPlan = nil
-        uninstallPlanError = nil
-    }
-
-    func loadUninstallPlan(deep: Bool) {
-        guard let app = selectedInstalledApplication, !app.protected, !isLoadingUninstallPlan else { return }
-        isLoadingUninstallPlan = true
-        uninstallPlan = nil
-        uninstallPlanError = nil
-        let requestedPath = app.path
-        Task {
-            do {
-                let plan = try await service.uninstallPlan(path: requestedPath, deep: deep)
-                if selectedInstalledApplication?.path == requestedPath {
-                    uninstallPlan = plan
-                }
-            } catch {
-                if selectedInstalledApplication?.path == requestedPath {
-                    uninstallPlanError = error.localizedDescription
-                }
-            }
-            isLoadingUninstallPlan = false
-        }
-    }
-
-    func clearUninstallPlan() {
-        uninstallPlan = nil
-        uninstallPlanError = nil
-    }
-
     func loadCachedScan() {
         let generation = scanOwnership.generation
         Task {
             do {
                 if let cached = try await service.cachedScan() {
                     guard scanOwnership.generation == generation,
-                          !isScanning,
+                          !busy, cacheItems.isEmpty, selectedCleanupPaths.isEmpty,
                           scanOwnership.activeJobID == nil else { return }
+                    let index = await Self.indexTree(cached)
+                    guard scanOwnership.generation == generation, !busy, cacheItems.isEmpty, selectedCleanupPaths.isEmpty else { return }
+                    loadedTree = index
                     scan = cached
                     rememberScan(cached)
                     path = cached.rootScan.root
@@ -217,22 +221,26 @@ final class AppModel: ObservableObject {
     }
 
     func loadRecipes() {
-        if isLoadingRecipes {
-            return
-        }
+        guard !busy else { return }
         isLoadingRecipes = true
-        Task {
+        errorMessage = nil
+        cleanupReviewTokens.removeAll()
+        cacheTask = Task {
+            defer { isLoadingRecipes = false; cacheTask = nil }
             do {
-                let response = try await service.recipes()
-                recipes = response.recipes
+                let response = try await service.cacheCatalog()
+                guard !Task.isCancelled else { return }
+                cacheItems = response.items
+                cacheWarnings = response.warnings
+                selectedItem = response.items.first
             } catch {
-                errorMessage = error.localizedDescription
+                if !Task.isCancelled { errorMessage = error.localizedDescription }
             }
-            isLoadingRecipes = false
         }
     }
 
-    func startRootScan(fast: Bool = true) {
+    func startRootScan(fast: Bool = false) {
+        guard !busy else { return }
         var isDirectory: ObjCBool = false
         let requestedRoot = URL(fileURLWithPath: path).standardizedFileURL.path
         guard FileManager.default.fileExists(atPath: requestedRoot, isDirectory: &isDirectory),
@@ -240,45 +248,21 @@ final class AppModel: ObservableObject {
             errorMessage = "Choose an existing folder before scanning."
             return
         }
+        clearCleanupSelection()
+        folderActivity = []
+        loadedTree = nil
+        scan = nil
         path = requestedRoot
         directoryNavigation.reset(rootPath: requestedRoot)
         forgetScans()
         refresh(fast: fast)
     }
 
-    func scanHomeForSafeCleanup() {
-        scanCleanupScope(Self.initialPath, tab: .safe)
-    }
-
-    func loadVersions() {
-        guard !isLoadingVersions else { return }
-        clearCleanupSelection()
-        versionError = nil
-        isLoadingVersions = true
-        let extra = additionalVersionProjectRoot.trimmingCharacters(in: .whitespacesAndNewlines)
-        Task {
-            defer { isLoadingVersions = false }
-            do { versionReport = try await service.versions(projects: extra.isEmpty ? [] : [extra]) }
-            catch { versionError = error.localizedDescription; versionReport = nil }
-        }
-    }
-
-    func scanCleanupScope(_ root: String, tab: AppTab) {
-        path = root
-        directoryNavigation.reset(rootPath: path)
-        forgetScans()
-        scan = nil
-        selectedItem = nil
-        selectedCleanupPaths.removeAll()
-        cleanupReviewTokens.removeAll()
-        selectedTab = tab
-        refresh(fast: false)
-    }
-
     func refresh(
-        fast: Bool = true,
+        fast: Bool = false,
         rollbackNavigation: DirectoryNavigation? = nil
     ) {
+        guard !isCleaning, !isRestoring, !isLoadingRecipes else { return }
         if let activeJobID = scanOwnership.activeJobID {
             service.cancelScan(jobID: activeJobID)
             scanTask?.cancel()
@@ -307,6 +291,7 @@ final class AppModel: ObservableObject {
         let requestedPath = path
         let requestedDepth = activeScanDepth
         let requestedLimit = activeScanLimit
+        cleanupReviewTokens.removeAll()
         scanTask = Task { [self] in
             do {
                 let result = try await service.appScan(
@@ -325,12 +310,18 @@ final class AppModel: ObservableObject {
                     }
                 )
                 guard scanOwnership.accepts(ticket) else { return }
+                scanStage = "Loading complete folder tree…"
+                let index = await Self.indexTree(result)
+                guard scanOwnership.accepts(ticket), !Task.isCancelled else { return }
+                loadedTree = index
                 scan = result
+                if path != result.rootScan.root {
+                    path = result.rootScan.root
+                    directoryNavigation.reset(rootPath: path)
+                }
                 rememberScan(result)
-                selectedItem = selectedTab == .safe ? safeOpportunities().first : result.largestItems.first
-                let availablePaths = Set(result.cleanupCandidates.map(\.path))
-                    .union(recipes.flatMap { $0.items.filter(\.appEligible).map(\.path) })
-                selectedCleanupPaths.formIntersection(availablePaths)
+                selectedItem = index?.children(of: path)?.first ?? result.largestItems.first
+                rememberRecentFolder(requestedPath)
                 scanStage = result.rootScan.partial ? "Complete (partial)" : "Complete"
                 scanProgress = 1.0
             } catch {
@@ -353,266 +344,25 @@ final class AppModel: ObservableObject {
 
     func cancelScan() {
         guard let jobID = scanOwnership.activeJobID else { return }
+        let pending = scanTask
         service.cancelScan(jobID: jobID)
         scanOwnership.cancel()
-        scanTask?.cancel()
+        let cancelledGeneration = scanOwnership.generation
+        pending?.cancel()
         progressTask?.cancel()
-        scanTask = nil
-        progressTask = nil
-        isScanning = false
-        scanStage = "Cancelled"
-        streamingItems = []
-    }
-
-    func scanDuplicates(preservingCleanupResults: Bool = false) {
-        duplicateTask?.cancel()
-        duplicateGeneration &+= 1
-        duplicateReviewTokens.removeAll()
-        duplicateSelections.removeAll()
-        if !preservingCleanupResults {
-            duplicateCleanupOutcomes.removeAll()
-        }
-        let generation = duplicateGeneration
-        isScanningDuplicates = true
-        duplicateError = nil
-        duplicateReport = nil
-        duplicateProgress = nil
-        let requestedPath = path
-        let requestedMinimum = duplicateMinMB
-        let jobID = UUID()
-        duplicateJobID = jobID
-        duplicateTask = Task { [self] in
-            defer {
-                if duplicateGeneration == generation {
-                    isScanningDuplicates = false
-                    duplicateJobID = nil
-                    duplicateTask = nil
-                }
-            }
-            do {
-                let report = try await service.duplicateScan(
-                    path: requestedPath,
-                    minMB: requestedMinimum,
-                    jobID: jobID,
-                    onProgress: { [weak self] progress in
-                        Task { @MainActor [weak self] in
-                            guard self?.duplicateGeneration == generation,
-                                  self?.duplicateJobID == jobID else { return }
-                            self?.duplicateProgress = progress
-                        }
-                    }
-                )
-                guard !Task.isCancelled, duplicateGeneration == generation else { return }
-                duplicateReport = report
-                duplicateSelections = report.groups.reduce(into: [:]) { selections, group in
-                    if let selection = try? DuplicateGroupSelection(
-                        group: group,
-                        strategy: .newest
-                    ) {
-                        selections[group.id] = selection
-                    }
-                }
-            } catch is CancellationError {
-                // Cancellation is an expected user action.
-            } catch {
-                guard !Task.isCancelled, duplicateGeneration == generation else { return }
-                duplicateError = error.localizedDescription
-            }
-        }
-    }
-
-    func cancelDuplicateScan() {
-        duplicateGeneration &+= 1
-        if let duplicateJobID {
-            service.cancelScan(jobID: duplicateJobID)
-        }
-        duplicateJobID = nil
-        duplicateTask?.cancel()
-        duplicateTask = nil
-        isScanningDuplicates = false
-    }
-
-    func setDuplicateStrategy(_ strategy: DuplicateKeepStrategy, for group: DuplicateGroup) {
-        duplicateReviewTokens.removeAll()
-        duplicateCleanupOutcomes.removeAll()
-        let manualKeeper = strategy == .manual
-            ? duplicateSelections[group.id]?.keeperPath
-            : nil
-        guard let selection = try? DuplicateGroupSelection(
-            group: group,
-            strategy: strategy,
-            manualKeeperPath: manualKeeper
-        ) else { return }
-        duplicateSelections[group.id] = selection
-        duplicateCleanupMessage = nil
-    }
-
-    func keepDuplicate(path: String, in group: DuplicateGroup) {
-        duplicateReviewTokens.removeAll()
-        duplicateCleanupOutcomes.removeAll()
-        guard let selection = try? DuplicateGroupSelection(
-            group: group,
-            strategy: .manual,
-            manualKeeperPath: path
-        ) else { return }
-        duplicateSelections[group.id] = selection
-        duplicateCleanupMessage = nil
-    }
-
-    func toggleDuplicateDeletion(path: String, in group: DuplicateGroup) {
-        duplicateReviewTokens.removeAll()
-        duplicateCleanupOutcomes.removeAll()
-        guard var selection = duplicateSelections[group.id],
-              selection.isCurrent(for: group) else { return }
-        _ = selection.toggleDeletion(path: path)
-        duplicateSelections[group.id] = selection
-        duplicateCleanupMessage = nil
-    }
-
-    func selectDuplicateCopies(in group: DuplicateGroup) {
-        duplicateReviewTokens.removeAll()
-        duplicateCleanupOutcomes.removeAll()
-        guard var selection = duplicateSelections[group.id],
-              selection.isCurrent(for: group) else { return }
-        selection.selectAllDeletable()
-        duplicateSelections[group.id] = selection
-        duplicateCleanupMessage = nil
-    }
-
-    func clearDuplicateCopies(in group: DuplicateGroup) {
-        duplicateReviewTokens.removeAll()
-        duplicateCleanupOutcomes.removeAll()
-        guard var selection = duplicateSelections[group.id] else { return }
-        selection.clearSelection()
-        duplicateSelections[group.id] = selection
-        duplicateCleanupMessage = nil
-    }
-
-    var selectedDuplicateCount: Int {
-        duplicateSelections.values.reduce(0) {
-            $0 + $1.selectedDeletionPaths.count
-        }
-    }
-
-    var selectedDuplicateBytes: UInt64 {
-        guard let duplicateReport else { return 0 }
-        let sizes = Dictionary(uniqueKeysWithValues: duplicateReport.groups.flatMap {
-            $0.files.map { ($0.path, $0.sizeBytes) }
-        })
-        return duplicateSelections.values
-            .flatMap(\.selectedDeletionPaths)
-            .reduce(0) { total, path in
-                let size = sizes[path] ?? 0
-                return total > UInt64.max - size ? UInt64.max : total + size
-            }
-    }
-
-    private func duplicateCleanupRequest() throws -> DuplicateCleanupRequest {
-        guard let duplicateReport else {
-            throw DuplicateSelectionError.groupMembershipChanged(groupID: "scan")
-        }
-        return try DuplicateCleanupRequest.make(
-            selections: Array(duplicateSelections.values),
-            currentGroups: duplicateReport.groups
-        )
-    }
-
-    func preflightDuplicateCleanup(_ completion: @escaping (Bool) -> Void) {
-        guard selectedDuplicateCount > 0, !isCleaningDuplicates else {
-            completion(false)
-            return
-        }
-        let request: DuplicateCleanupRequest
-        do {
-            request = try duplicateCleanupRequest()
-        } catch {
-            duplicateCleanupMessage = "Duplicate selection changed; rescan before cleanup."
-            completion(false)
-            return
-        }
-
-        isCleaningDuplicates = true
-        duplicateCleanupMessage = nil
-        duplicateCleanupOutcomes = []
+        scanStage = "Stopping…"
         Task {
-            defer { isCleaningDuplicates = false }
-            do {
-                let response = try await service.duplicateCleanup(
-                    request: request,
-                    dryRun: true
-                )
-                duplicateCleanupOutcomes = response.outcomes
-                duplicateReviewTokens = Dictionary(
-                    uniqueKeysWithValues: response.outcomes.compactMap {
-                        guard $0.error == nil, let token = $0.reviewToken else { return nil }
-                        return ($0.path, token)
-                    }
-                )
-                let requestedCount = request.groups.reduce(0) { $0 + $1.deletePaths.count }
-                guard requestedCount > 0,
-                      duplicateReviewTokens.count == requestedCount,
-                      response.failedCount == 0 else {
-                    duplicateReviewTokens.removeAll()
-                    duplicateCleanupMessage = response.groups
-                        .compactMap(\.error)
-                        .first
-                        ?? response.outcomes.compactMap(\.error).first
-                        ?? "Duplicate cleanup review failed; rescan and try again."
-                    completion(false)
-                    return
-                }
-                duplicateCleanupMessage = "Review passed for \(requestedCount) duplicate copy/copies."
-                completion(true)
-            } catch {
-                duplicateReviewTokens.removeAll()
-                duplicateCleanupMessage = error.localizedDescription
-                completion(false)
-            }
+            await pending?.value
+            guard scanOwnership.generation == cancelledGeneration else { return }
+            scanTask = nil
+            progressTask = nil
+            isScanning = false
+            scanStage = "Cancelled"
+            streamingItems = []
         }
     }
 
-    func cleanSelectedDuplicates() {
-        guard selectedDuplicateCount > 0, !isCleaningDuplicates else { return }
-        let request: DuplicateCleanupRequest
-        do {
-            request = try duplicateCleanupRequest()
-        } catch {
-            duplicateCleanupMessage = "Duplicate selection changed; rescan before cleanup."
-            return
-        }
-        let requestedCount = request.groups.reduce(0) { $0 + $1.deletePaths.count }
-        guard duplicateReviewTokens.count == requestedCount else {
-            duplicateCleanupMessage = "Duplicate review expired. Review selected copies again."
-            return
-        }
-
-        isCleaningDuplicates = true
-        duplicateCleanupMessage = nil
-        duplicateCleanupOutcomes = []
-        Task {
-            defer { isCleaningDuplicates = false }
-            do {
-                let response = try await service.duplicateCleanup(
-                    request: request,
-                    reviewTokens: duplicateReviewTokens,
-                    dryRun: false
-                )
-                duplicateCleanupOutcomes = response.outcomes
-                duplicateReviewTokens.removeAll()
-                let session = response.sessionId.map { " Session: \($0)." } ?? ""
-                let receiptWarning = response.receiptError.map {
-                    " Receipt warning: \($0) Use Finder’s Trash for recovery."
-                } ?? ""
-                duplicateCleanupMessage =
-                    "Moved \(response.movedCount) duplicate copy/copies (\(formatBytes(response.movedBytes))) to Trash; \(response.failedCount) failed.\(session)\(receiptWarning)"
-                loadHistory()
-                scanDuplicates(preservingCleanupResults: true)
-            } catch {
-                duplicateReviewTokens.removeAll()
-                duplicateCleanupMessage = error.localizedDescription
-            }
-        }
-    }
+    func cancelCacheLookup() { cacheTask?.cancel() }
 
     private func tickScanProgress() {
         guard let scanStartedAt, isScanning else {
@@ -632,8 +382,34 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private nonisolated static func indexTree(_ scan: AppScan) async -> LoadedTree? {
+        guard let inventory = scan.rootScan.inventory else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            LoadedTree(inventory: inventory, candidates: scan.cleanupCandidates)
+        }.value
+    }
+
+    /// Useful for fixture loading and immutable inventory installation.
+    func installLoadedScan(_ scan: AppScan) async {
+        loadedTree = await Self.indexTree(scan)
+        self.scan = scan
+        path = scan.rootScan.root
+        directoryNavigation.reset(rootPath: path)
+        selectedItem = loadedTree?.children(of: path)?.first ?? scan.largestItems.first
+    }
+
+    var currentFolder: AppScanItem? {
+        if let item = loadedTree?.folder(path) { return item }
+        guard let root = displayScan?.rootScan.tree else { return nil }
+        return AppScanItem(name: root.name, path: root.path, sizeBytes: root.sizeBytes, percentOfRoot: 100,
+                           isDir: root.isDir, partial: root.partial, safety: root.safety, cleanKind: root.cleanKind,
+                           cleanupAction: root.cleanupAction, cleanupReason: root.cleanupReason,
+                           logicalSizeBytes: root.logicalSizeBytes, hardLinkDuplicate: root.hardLinkDuplicate)
+    }
+
     func mapItems(in scan: AppScan) -> [AppScanItem] {
-        isScanning && !streamingItems.isEmpty ? streamingItems : scan.largestItems
+        if isScanning, !streamingItems.isEmpty { return streamingItems }
+        return loadedTree?.children(of: path) ?? scan.largestItems
     }
 
     var displayScan: AppScan? {
@@ -693,6 +469,7 @@ final class AppModel: ObservableObject {
     }
 
     func goUp() {
+        guard !directoryNavigation.isAtRoot else { return }
         transitionDirectory { $0.goUp() }
     }
 
@@ -721,11 +498,28 @@ final class AppModel: ObservableObject {
     private func transitionDirectory(
         _ transition: (inout DirectoryNavigation) -> String?
     ) {
+        guard !busy else { return }
+        cleanupReviewTokens.removeAll()
         let previous = directoryNavigation
         var next = directoryNavigation
         guard let target = transition(&next) else { return }
         directoryNavigation = next
         path = target
+        if let loadedTree, loadedTree.containsDirectory(target) {
+            selectedItem = loadedTree.children(of: target)?.first
+            errorMessage = nil
+            scanStage = "Loaded tree"
+            return
+        }
+        // A different scope requires an explicit new full scan; descendants already
+        // present in the inventory never arrive here.
+        if loadedTree != nil {
+            loadedTree = nil
+            scan = nil
+            directoryNavigation.reset(rootPath: target)
+            refresh(fast: false, rollbackNavigation: previous)
+            return
+        }
         if let cached = scansByPath[target] {
             if let activeJobID = scanOwnership.activeJobID {
                 service.cancelScan(jobID: activeJobID)
@@ -810,12 +604,22 @@ final class AppModel: ObservableObject {
     }
 
     func toggleCleanup(_ item: AppScanItem) {
+        guard !busy else { return }
         cleanupReviewTokens.removeAll()
+        collectedItems[item.path] = item
         selectedCleanupPaths = CleanupSelectionRules.toggling(
             path: item.path,
             isSelectable: item.canMoveToTrash,
             in: selectedCleanupPaths
         )
+    }
+
+    func addSafeCaches(from items: [AppScanItem]) {
+        guard !busy else { return }
+        let eligible = CleanupSelectionRules.safeSelectablePaths(in: items)
+        for item in items where eligible.contains(item.path) && !selectedCleanupPaths.contains(item.path) {
+            toggleCleanup(item)
+        }
     }
 
     func selectSafeCandidates(in scan: AppScan) {
@@ -826,6 +630,7 @@ final class AppModel: ObservableObject {
     func selectSafeCandidates(from items: [AppScanItem]) {
         cleanupReviewTokens.removeAll()
         selectedRecipe = nil
+        for item in items { collectedItems[item.path] = item }
         selectedCleanupPaths = CleanupSelectionRules.safeSelectablePaths(in: items)
     }
 
@@ -841,19 +646,21 @@ final class AppModel: ObservableObject {
     func clearCleanupSelection() {
         cleanupReviewTokens.removeAll()
         selectedCleanupPaths.removeAll()
+        collectedItems.removeAll()
         selectedRecipe = nil
     }
 
     func selectRecipePaths(_ recipe: CleanupRecipe) {
         cleanupReviewTokens.removeAll()
         selectedRecipe = recipe
+        for item in recipe.items { collectedItems[item.path] = AppScanItem(recipeItem: item, recipe: recipe) }
         selectedCleanupPaths = CleanupSelectionRules.selectableRecipePaths(in: recipe)
         selectedItem = recipeCandidateItems().first
-        selectedTab = .clean
+        selectedTab = .map
     }
 
     func cleanSelected() {
-        guard !selectedCleanupPaths.isEmpty, !isCleaning else {
+        guard !selectedCleanupPaths.isEmpty, !busy else {
             return
         }
         isCleaning = true
@@ -879,16 +686,20 @@ final class AppModel: ObservableObject {
                 cleanupMessage = "Moved \(response.movedCount) item(s) (\(formatBytes(response.movedBytes))) to Trash; \(formatBytes(response.reclaimedBytes)) reclaimed until Trash is emptied. \(response.failedCount) failed.\(sessionDetail)\(failureDetail)\(receiptDetail)"
                 cleanupOutcomes = response.outcomes
                 selectedCleanupPaths.removeAll()
+                collectedItems.removeAll()
                 cleanupReviewTokens.removeAll()
                 selectedRecipe = nil
                 loadHistory()
-                loadRecipes()
+                recipes = []
+                cacheItems = []
+                cacheWarnings = []
                 forgetScans()
                 // The cached scan describes the files before the Trash move.
-                // Scan again so successfully removed candidates disappear
-                // instead of looking as though cleanup did nothing.
-                if selectedTab == .versions { loadVersions() }
-                else { refresh(fast: !activeScanIsDeep) }
+                // Invalidate the old view; refresh only when the user asks.
+                loadedTree = nil
+                scan = nil
+                selectedItem = nil
+                scanStage = "Refresh to update storage"
             } catch {
                 cleanupMessage = error.localizedDescription
             }
@@ -897,7 +708,7 @@ final class AppModel: ObservableObject {
     }
 
     func preflightCleanup(_ completion: @escaping (Bool) -> Void) {
-        guard !selectedCleanupPaths.isEmpty, !isCleaning else {
+        guard !selectedCleanupPaths.isEmpty, !busy else {
             completion(false)
             return
         }
@@ -905,7 +716,7 @@ final class AppModel: ObservableObject {
         cleanupMessage = nil
         cleanupOutcomes = []
         let paths = Array(selectedCleanupPaths)
-        cleanupProjectRoots = versionReport?.projectRoots ?? []
+        cleanupProjectRoots = []
         let projects = cleanupProjectRoots
         Task {
             defer { isCleaning = false }
@@ -952,7 +763,7 @@ final class AppModel: ObservableObject {
     }
 
     func restore(_ session: HistorySession) {
-        guard !isRestoring else {
+        guard !busy else {
             return
         }
         isRestoring = true
@@ -960,216 +771,20 @@ final class AppModel: ObservableObject {
         Task {
             do {
                 let response = try await service.restore(sessionId: session.sessionId)
-                restoreMessage = "Restored \(response.restoredCount) item(s), \(response.failedCount) failed."
+                restoreMessage = "Restored \(response.restoredCount) item(s), \(response.failedCount) failed." + response.outcomes.compactMap { $0.error.map { " \($0)" } }.joined()
                 loadHistory()
-                loadCachedScan()
+                forgetScans()
+                loadedTree = nil
+                scan = nil
+                recipes = []
+                cacheItems = []
+                cacheWarnings = []
+                clearCleanupSelection()
+                scanStage = "Refresh to update storage"
             } catch {
                 restoreMessage = error.localizedDescription
             }
             isRestoring = false
         }
-    }
-}
-
-struct RootView: View {
-    @StateObject private var model: AppModel
-    private let loadsStartupData: Bool
-
-    @MainActor
-    init(model: AppModel? = nil, loadsStartupData: Bool = true) {
-        _model = StateObject(wrappedValue: model ?? AppModel())
-        self.loadsStartupData = loadsStartupData
-    }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 10) {
-                    Image(systemName: "externaldrive.fill").font(.title2).foregroundStyle(Color.accentColor)
-                    Text("MacClean").font(.title3.weight(.semibold))
-                }.padding(20)
-                ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 18) {
-                        sidebarSection("Storage", tabs: [.dashboard, .map, .safe, .duplicates])
-                        sidebarSection("Cleanup", tabs: [.clean, .developer, .temporary, .versions, .uninstall, .history])
-                        sidebarSection("System", tabs: [.monitor, .access])
-                    }.padding(.horizontal, 12).padding(.bottom, 16)
-                }.scrollIndicators(.visible)
-            }
-            .frame(width: 190)
-            .background(Color(nsColor: .controlBackgroundColor))
-            Divider()
-            VStack(spacing: 0) {
-                ToolbarView(model: model)
-                Divider()
-                content
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .clipped()
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .windowBackgroundColor))
-        }
-        .tint(.accentColor)
-        .task { if loadsStartupData { model.loadStartupData() } }
-    }
-
-    private func sidebarSection(_ title: String, tabs: [AppTab]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                .padding(.leading, 10).padding(.bottom, 4)
-            ForEach(tabs) { tab in
-                Button { model.selectedTab = tab } label: {
-                    Label(tab.title, systemImage: tab.icon)
-                        .font(.callout.weight(model.selectedTab == tab ? .semibold : .regular))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 10).padding(.vertical, 10)
-                        .foregroundStyle(model.selectedTab == tab ? Color.accentColor : Color.primary)
-                        .background(model.selectedTab == tab ? Color.accentColor.opacity(0.12) : Color.clear,
-                                    in: RoundedRectangle(cornerRadius: 8))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain).accessibilityIdentifier("sidebar.\(tab.rawValue)")
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        switch model.selectedTab {
-        case .dashboard:
-            DashboardView(model: model)
-        case .safe:
-            SafeCleanupView(model: model)
-        case .map:
-            MapView(model: model)
-        case .duplicates:
-            DuplicatesView(model: model)
-        case .clean:
-            CleanReviewView(model: model)
-        case .developer:
-            DeveloperView(model: model)
-        case .temporary:
-            TemporaryBuildsView(model: model)
-        case .versions:
-            VersionsReviewView(model: model)
-        case .monitor:
-            MonitorView(model: model)
-        case .history:
-            HistoryView(model: model)
-        case .uninstall:
-            UninstallView(model: model)
-        case .access:
-            FullDiskAccessView(model: model)
-        }
-    }
-}
-
-enum AppTab: String, CaseIterable, Identifiable {
-    case dashboard
-    case safe
-    case map
-    case duplicates
-    case clean
-    case developer
-    case temporary
-    case versions
-    case monitor
-    case history
-    case uninstall
-    case access
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .dashboard: "Dashboard"
-        case .safe: "Safe Cleanup"
-        case .map: "Map"
-        case .duplicates: "Duplicates"
-        case .clean: "Clean"
-        case .developer: "Developer"
-        case .temporary: "Temporary Builds"
-        case .versions: "Versions Review"
-        case .monitor: "Monitor"
-        case .history: "History"
-        case .uninstall: "Uninstall"
-        case .access: "Access"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .dashboard: "gauge.with.dots.needle.67percent"
-        case .safe: "checkmark.shield"
-        case .map: "square.grid.3x3"
-        case .duplicates: "doc.on.doc"
-        case .clean: "checklist"
-        case .developer: "hammer"
-        case .temporary: "clock.arrow.circlepath"
-        case .versions: "shippingbox"
-        case .monitor: "waveform.path.ecg"
-        case .history: "clock.arrow.circlepath"
-        case .uninstall: "app.badge"
-        case .access: "lock.shield"
-        }
-    }
-}
-
-struct ToolbarView: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "folder").foregroundStyle(.secondary)
-                TextField("Folder to scan", text: $model.path)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(minWidth: 120, maxWidth: .infinity)
-                    .onSubmit { model.startRootScan() }
-                    .accessibilityIdentifier("toolbar.path")
-                Button { model.chooseScanFolder() } label: { Image(systemName: "folder.badge.plus") }
-                    .disabled(model.isScanning).help("Choose a folder")
-                    .accessibilityLabel("Choose Folder").accessibilityIdentifier("toolbar.chooseFolder")
-                Button { model.revealCurrentPath() } label: { Image(systemName: "finder") }
-                    .help("Reveal the current folder in Finder")
-                    .accessibilityLabel("Reveal current path in Finder").accessibilityIdentifier("toolbar.revealPath")
-                Button { model.startRootScan() } label: { Label("Scan", systemImage: "bolt.fill") }
-                    .buttonStyle(.borderedProminent).disabled(model.isScanning)
-                    .help("Fast Scan").accessibilityIdentifier("toolbar.fastScan")
-                Menu {
-                    Button("Deep Scan") { model.startRootScan(fast: false) }
-                        .disabled(model.isScanning).accessibilityIdentifier("toolbar.deepScan")
-                    Divider()
-                    Toggle("Include System Data", isOn: $model.includeSystemData)
-                    Toggle("Include Health", isOn: $model.includeHealth)
-                } label: { Image(systemName: "ellipsis") }
-                .menuStyle(.borderlessButton).frame(width: 24)
-                .help("Scan options").accessibilityLabel("Scan options")
-            }
-            HStack(spacing: 8) {
-                if model.isScanning {
-                    ProgressView(value: model.scanProgress).frame(width: 100)
-                    Text(model.scanStage).lineLimit(1)
-                    Text("\(model.scanElapsedSeconds)s").monospacedDigit()
-                    Button("Stop", action: model.cancelScan).accessibilityIdentifier("toolbar.stop")
-                } else if let error = model.errorMessage {
-                    Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
-                    Text(error).lineLimit(1).help(error)
-                } else {
-                    Image(systemName: "checkmark.circle").foregroundStyle(.secondary)
-                    Text(model.scan == nil ? "Ready to scan" : "\(model.scanStage) • \(formatBytes(model.scan?.rootScan.tree.sizeBytes ?? 0))")
-                }
-                Spacer(minLength: 8)
-                if model.fullDiskAccessStatus == .denied {
-                    Button { model.selectedTab = .access } label: { Label("Limited Access", systemImage: "lock.shield") }
-                        .buttonStyle(.plain).foregroundStyle(.orange)
-                        .help(model.fullDiskAccessStatus.detail)
-                }
-            }
-            .font(.caption).foregroundStyle(.secondary)
-            .frame(height: 22)
-        }
-        .padding(.horizontal, 16).padding(.vertical, 12)
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 }

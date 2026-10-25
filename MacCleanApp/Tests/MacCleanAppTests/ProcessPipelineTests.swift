@@ -23,8 +23,21 @@ final class ProcessPipelineTests: XCTestCase {
             jobID: UUID(),
             onLine: { _ in }
         )
-        let object = try JSONSerialization.jsonObject(with: result) as? [String: Int]
-        XCTAssertEqual(object?["value"], 42)
+        let object = try JSONSerialization.jsonObject(with: result) as? [String: Any]
+        XCTAssertEqual(object?["type"] as? String, "result")
+        XCTAssertEqual((object?["data"] as? [String: Int])?["value"], 42)
+    }
+
+    func testFramingRetainsLargeSplitRecordAndFinalUnterminatedLine() {
+        let buffer = ProcessOutputBuffer()
+        let first = Data(repeating: 65, count: 200_000)
+        XCTAssertTrue(buffer.appendAndTakeLines(first).isEmpty)
+        XCTAssertTrue(buffer.appendAndTakeLines(Data("tail".utf8)).isEmpty)
+        let lines = buffer.appendAndTakeLines(Data("\nnext\nlast".utf8))
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertEqual(lines[0], first + Data("tail".utf8))
+        XCTAssertEqual(String(decoding: lines[1], as: UTF8.self), "next")
+        XCTAssertEqual(buffer.appendAndTakeLines(Data(), finish: true), [Data("last".utf8)])
     }
 
     func testCancellingRunTerminatesTheChild() async {

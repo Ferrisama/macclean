@@ -1,8 +1,14 @@
 # macclean
 
-> Mac system maintenance CLI — clean, analyze, secure, monitor.
+> Native Mac storage exploration and reviewed cleanup — under development.
 
-40+ commands covering every category of Mac waste: caches, dev artifacts, Docker, Xcode, ghost app files, Time Machine snapshots, ZSH history, duplicate files, and more. Plus security checks, network inspection, and system monitoring.
+Development direction: the [single roadmap](ROADMAP.md) narrows
+the next release to storage exploration, reviewed cleanup, and recovery. The
+features documented below describe the current implementation; planned removals
+and performance targets have not shipped yet.
+
+The legacy maintenance CLI remains available in this checkout; it is not the
+lean native app's feature promise. It includes 40+ commands covering every category of Mac waste: caches, dev artifacts, Docker, Xcode, ghost app files, Time Machine snapshots, ZSH history, duplicate files, and more. Plus security checks, network inspection, and system monitoring.
 
 Single self-contained binary. No Python, no runtime, no dependencies.
 
@@ -62,36 +68,35 @@ Analyzing, scanning, and building an uninstall plan all run in the background, s
 
 ## Native macOS app
 
-The repository also includes a native SwiftUI beta focused on trustworthy
-storage exploration and recoverable cleanup. It currently provides:
+The native SwiftUI app now focuses on **Explore** and **History**, with an
+original black/red interface and a shared cleanup review tray.
 
-- Fast and Deep scans with streamed progress, cancellation, cached startup,
-  partial-coverage reporting, and safety classification.
-- A Safe Cleanup screen that lists eligible caches by size, combines known
-  recipes with scan findings, and finds candidates below the visible map depth.
-- A responsive storage map with proportional rounded tiles,
-  hover/selection feedback, Finder actions, and compact/large-window layouts.
-- Consistent page scrolling, inline cleanup details, and a scrollable app-review
-  sheet. Single-click map tiles to inspect; double-click folders to open them.
-- Reversible directory navigation with Back, Forward, Parent, scan-root,
-  clickable breadcrumb, cached revisits, and failed-navigation rollback controls.
-- Developer Cleanup for verified Cargo project output and a Temporary Builds
-  screen for owned Cargo targets in `/private/tmp`, with manual selection and
-  activity checks before Trash.
-- Known VS Code and Codex runtime caches with settings and sessions excluded.
-- Versions Review for standard rustup, nvm, and pyenv installs and obsolete
-  VS Code/Cursor extension copies, with default, project-pin, editor-profile,
-  and open-file checks before reviewed Trash removal.
-- Cleanup recipes and scan candidates that are reviewed before selected paths
-  move to Trash.
-- Content-verified duplicate groups with explicit keeper selection, immediate
-  content/identity revalidation, Trash receipts, History, and restore.
-- Exact recorded Trash destinations, per-path outcomes, collision-safe restore,
-  and warnings that distinguish moved bytes from reclaimed disk space.
-- Full Disk Access status and System Settings guidance without requesting access
-  during normal scans.
-- A searchable installed-app list and read-only standard/deep uninstall-plan
-  preview. Destructive uninstall execution remains a follow-up beta slice.
+- A circuit-style folder explorer with thin branch connectors, generous spacing,
+  explicit sizes, and separate inspection/navigation controls. No area-filling
+  rectangles or radial chart.
+- Complete folder scans retain the full flat file/folder tree beyond display
+  limits. Descendant, Back, and Forward navigation use loaded observations;
+  streamed progress, cancellation, empty items, and partial coverage remain visible.
+- **Find caches** explicitly measures known Stremio, Cargo, npm, pnpm, Yarn, Bun,
+  Gradle, editor, and user Library cache locations. Settings, credentials, and
+  Stremio WebKit/sign-in storage are excluded from this catalog. Configured custom
+  package-store locations are not inferred by running package managers.
+- Add paths individually, or use **Add safe caches**, then review exact paths.
+  Identity and relevant open-file/activity checks run again before Trash.
+- Trash receipts, exact recorded destinations, History, and collision-safe restore.
+  Bytes moved are distinguished from disk space freed.
+- Recent scan folders persist locally. App activity and Folder activity are
+  explicit read-only checks with 90/180-day and Unknown filters. Spotlight dates
+  may be absent or stale; age alone never authorizes removal. App activity covers
+  apps directly in `/Applications` and `~/Applications`; folder activity covers
+  directories visible in the selected scan.
+- No eager cleanup recipes, health polling, automatic home scan, duplicate hashing,
+  installed-version scan, or uninstall workflow in the native startup path.
+- Permission guidance lives in Settings. Nothing is cleaned automatically.
+
+The legacy CLI remains available. The bulk scanner and persistent backend queries,
+and further backend pruning in [the roadmap](ROADMAP.md) remain
+follow-up engine work; this UI rebuild does not claim a measured scan speedup.
 
 Build a self-contained bundle with:
 
@@ -139,10 +144,10 @@ cleanup, duplicate keeper preservation, Trash receipts, History, and restore.
 The upgrade verifier rebuilds the signed app and checks that its designated
 requirement and isolated persisted state remain compatible.
 
-Current beta gaps are rendered SwiftUI automation across window sizes,
-post-result background deep refinement, destructive uninstall execution through
-the reviewed recovery pipeline, Intel/universal bundle testing, and public
-Developer ID signing/notarization.
+Current beta gaps include packaged-window automation and real-data performance
+measurement, the bulk scanner and large-inventory performance, Intel/universal testing,
+and public Developer ID signing/notarization. Rendered native fixture tests cover
+Explore, History, and review-sheet scrolling at compact and wide sizes.
 
 ---
 

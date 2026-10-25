@@ -18,7 +18,11 @@ In a logged-in macOS desktop session, also run:
 ./scripts/test-ui.sh
 ```
 
-This hosts the actual SwiftUI views in native windows with disposable in-memory data. It checks page width and scrolling at 860×600 and 1440×900, clicks cleanup rows and checkboxes, selects a map tile before scrolling, and verifies that temporary build output requires manual selection. Screenshots are saved to `dist/ui-snapshots/`. These checks do not delete files or start real scans.
+This hosts the actual SwiftUI views with disposable in-memory data. It checks
+Explore and History at 860×600 and 1440×900, circuit branch selection without a scan, and
+scrolling a long review sheet. Screenshots are saved to `dist/ui-snapshots/`.
+These checks do not delete files or start real scans. The separate packaged
+backend smoke test retains legacy duplicate/version fixtures for compatibility.
 
 ## Human window pass
 
@@ -39,20 +43,18 @@ Enter `$TEST_ROOT` in the app's Path field. Replace it with the actual path prin
 
 | Area | Action | Expected result |
 |---|---|---|
-| Dashboard and toolbar | Click Scan, then choose Deep Scan from the ellipsis menu. Turn System Data and Health on and off in that menu. | Scan finishes, sizes and status appear, and the app stays responsive. |
-| Safe Cleanup | Open Safe Cleanup, sort through the size-ranked list, search for a cache, and use Find Hidden Caches. | Known caches appear without map navigation; a deep home scan adds eligible hidden folders and the list stays largest first. |
-| Developer | Click Find Home Build Output, inspect a verified Cargo target, and select it manually. | Target is marked Review; project files outside the target stay excluded. Running Rust builds block cleanup. |
-| Temporary Builds | Click Find Temporary Builds and review the largest verified targets. | Only owned Cargo output is offered; arbitrary temporary folders are excluded. |
-| Versions Review | Click Check Versions, add an external project folder if needed, inspect protection reasons, and review an eligible old version. Add a project pin before confirming removal. | Defaults, pinned versions, Python virtual environments, and registered extensions stay protected. The new pin blocks execution despite the earlier review token. Successful removals restore from History. |
-| Editor caches | Refresh recipes and review Editor and Codex Caches. | Known cache paths appear; VS Code User data and Codex sessions remain excluded. Close relevant apps before cleanup. |
-| Map | Single-click a tile to inspect; double-click `folder` or use Open Folder. Use Back, Forward, Parent, root, and breadcrumb controls; change sort and filters. | The path and visible items follow each control. Revisiting a scanned folder is immediate and does not start another scan. |
-| Duplicates | Scan `$TEST_ROOT/duplicates` with the minimum size set low enough for the fixture; choose a keeper, review the other copy, move it to Trash, then restore it from History. | Two identical files form one group; the keeper stays in place and the other copy returns after restore. |
-| Clean | Review a selectable cache item, run the dry-run/review step, then confirm moving only the fixture item to Trash. | The item disappears from its original path, a result appears, and unrelated files remain. |
-| History | Open the new session and restore it. | The fixture returns to its original path and the session reflects the restore. |
-| Uninstall | Search installed apps and open standard/deep plan previews. | The plan is read-only; no app is removed. |
-| Access, Developer, Monitor | Open each screen and inspect status, recipes, and health cards. | Each screen loads and errors or partial access are explained clearly. |
-| Scrolling | Scroll every long page, expand a cleanup row, select checkboxes, and continue scrolling. Repeat with a mouse wheel and trackpad. | The main page continues to scroll, with no trapped gestures or clipped controls. |
-| Scan interruption | Start a Deep Scan on a larger disposable folder and click Stop. | Progress stops and another scan can be started. |
+| Startup | Open the app | Explore and History only; no automatic home scan or cache traversal |
+| Scan | Scan folder on the disposable fixture | Full tree retained beyond display depth/limits; correct scope and freshness, incomplete coverage visible |
+| Explorer | Select a circuit branch, then open its folder; navigate deep and back/forward | Selection opens compact details or the wide inspector; navigation uses the loaded tree without rescanning |
+| Caches | Choose Find caches; inspect Stremio, Cargo, npm or pnpm if installed | Only known locations; settings/sign-in data excluded; no default selection |
+| Collection | Add individual paths or Add safe caches | One shared tray; overlapping paths deduplicated; review-only sources are not bulk-added |
+| Review | Check selected paths, then confirm only disposable fixture paths | Replaced/active targets fail; exact identity-bound paths move to Trash |
+| Results and History | Inspect outcomes and restore the fixture session | Per-path failures visible; exact recorded destinations restored without overwrites |
+| Recent | Complete a scan, reopen it from Recent, restart the app | Recent scopes persist; clearing recents does not erase receipts |
+| Activity | Run App activity or Folder activity; change age and Unknown filters | Read-only Spotlight metadata; unknown/stale dates do not authorize cleanup |
+| Settings | Check access and open System Settings | Permission limitations explained; no maintenance controls |
+| Cancellation | Stop a scan or cache lookup | Workers exit before another mutation can begin; cancelled results do not replace current state |
+| Layout | Scroll and select at compact/wide sizes | Controls fit; map, inspector, and review remain usable |
 
 After confirming the restored fixture, remove the disposable `TEST_ROOT` folder yourself. Do not use personal folders for destructive UI checks.
 
@@ -60,30 +62,24 @@ After confirming the restored fixture, remove the disposable `TEST_ROOT` folder 
 
 The Swift package includes opt-in AppKit-hosted rendered tests through `scripts/test-ui.sh`. It has no XCUITest runner against the packaged app (`dev.macclean.app`). OS dialogs, trackpad momentum, real scan performance, and full cleanup/restore flows still need the human window pass above. A successful automated check alone is not a claim of full UI coverage.
 
-## Version review coverage
+## Retained compatibility checks
 
-Versions Review inventories standard `~/.rustup/toolchains`, `~/.nvm/versions/node`,
-`~/.pyenv/versions`, `~/.vscode/extensions`, and `~/.cursor/extensions` locations.
-It reads defaults, Rust directory overrides, the current process environment,
-`rust-toolchain`/`rust-toolchain.toml`, `.nvmrc`, `.node-version`, `.python-version`,
-`.pyenv-version`, `.tool-versions`, and Node `package.json` engine requirements.
-Node ranges and unresolved aliases are treated conservatively and may protect
-all Node versions. Custom and linked toolchains remain protected.
+The broad legacy CLI remains available. Its duplicate/version safety and restore
+fixtures remain in the packaged smoke script, but those workflows are no longer
+native app destinations. Bulk scanning and persistent backend queries remain
+separate engine work in the lean storage plan.
 
-Home projects and explicitly supplied additional roots are checked. Generated
-folders, manager data, Library, and Git data are skipped. Depth is capped at 16
-and entries at 100,000 per root. Incomplete coverage blocks removal; usage in
-unscanned locations is unknown. The app accepts one additional project root;
-the CLI accepts repeated `--projects` arguments. Manager installations in
-custom locations are outside this first version of the inventory.
+For capacity/search changes, verify capacity appears before any scan and remains
+separate from measured scope bytes. Check its unavailable/retry state. After a
+full scan, find a deeply nested filename from the root, search a path, change
+kind/size filters, expand results, clear the query, and show a result in its
+containing folder. Navigation must use the loaded inventory. Rapidly replace a
+query and start a new scan to confirm old results do not reappear. The 100K-file
+unit fixture checks full counts and bounded results; it is not a release benchmark.
 
-Extension cleanup requires a valid package identity, an obsolete marker, no
-registration in the editor or its profiles, and a newer registered copy that
-will remain. Project recommendations with an exact `id@version` are protected.
-Missing or malformed registration metadata blocks cleanup. Check open files
-and pin requirements again during review and immediately before each move.
-Removal uses Trash and History, preserving manager defaults and editor state.
-
-Reference formats: [Rust overrides](https://rust-lang.github.io/rustup/overrides.html),
-[nvm project versions](https://github.com/nvm-sh/nvm#nvmrc),
-[pyenv version selection](https://github.com/pyenv/pyenv#understanding-python-version-selection).
+Check branch bars with an 80/15/5 split, a single child, zero allocated bytes,
+partial coverage and unknown totals. Every sibling must use the same measured
+folder denominator, and row height must remain readable. On a disposable scope
+with more than 512 classified cleanup roots, verify full candidate counts, filter
+matches and Show next expansion. Existing review/identity/restore protections must
+still apply to candidates beyond the original first batch.

@@ -3,7 +3,7 @@ import XCTest
 
 final class UIRegressionLogicTests: XCTestCase {
     @MainActor
-    func testDashboardRecipeSelectionOpensCleanupReviewAndClearResetsIt() {
+    func testImportedRecipeSelectionUsesSharedExploreTrayAndClearResetsIt() {
         let model = AppModel()
         let recipe = CleanupRecipe(
             id: "cache",
@@ -19,7 +19,7 @@ final class UIRegressionLogicTests: XCTestCase {
 
         model.selectRecipePaths(recipe)
 
-        XCTAssertEqual(model.selectedTab, .clean)
+        XCTAssertEqual(model.selectedTab, .map)
         XCTAssertEqual(model.selectedCleanupPaths, ["/eligible"])
         XCTAssertEqual(model.selectedRecipe?.id, "cache")
 

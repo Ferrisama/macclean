@@ -12,7 +12,6 @@ use crate::core::storage::{
 use crate::core::{CleanKind, RiskLevel};
 
 const RECIPE_ITEM_LIMIT: usize = 30;
-const CLEANUP_CANDIDATE_LIMIT: usize = 512;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppScanOptions {
@@ -38,6 +37,8 @@ pub struct AppScanProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppScan {
     pub schema_version: u32,
+    #[serde(default)]
+    pub cleanup_discovery_version: u32,
     pub root_scan: StorageScan,
     pub system_data: Option<SystemDataScan>,
     pub largest_items: Vec<AppScanItem>,
@@ -92,6 +93,10 @@ pub struct AppScanItem {
     pub clean_kind: CleanKind,
     pub cleanup_action: String,
     pub cleanup_reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub hard_link_duplicate: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -136,13 +141,22 @@ where
                 item: (size > 0).then(|| app_scan_item(&node, size)),
             });
         };
-    let root_scan = storage::scan_tree_with_progress(
-        options.root.clone(),
-        options.depth,
-        options.limit,
-        options.mode,
-        Some(&storage_progress),
-    )?;
+    let root_scan = if options.mode == ScanMode::Deep {
+        storage::scan_tree_with_inventory(
+            options.root.clone(),
+            options.depth,
+            options.limit,
+            Some(&storage_progress),
+        )?
+    } else {
+        storage::scan_tree_with_progress(
+            options.root.clone(),
+            options.depth,
+            options.limit,
+            options.mode,
+            Some(&storage_progress),
+        )?
+    };
     progress(AppScanProgress {
         stage: "Classifying cleanup candidates".into(),
         current_path: None,
@@ -152,7 +166,9 @@ where
         partial: root_scan.partial,
         item: None,
     });
-    let _ = storage::write_tree_cache(&root_scan);
+    if root_scan.inventory.is_none() {
+        let _ = storage::write_tree_cache(&root_scan);
+    }
 
     let system_data = options.include_system_data.then(|| {
         progress(AppScanProgress {
@@ -193,9 +209,10 @@ where
         safety_rank(a.safety)
             .cmp(&safety_rank(b.safety))
             .then_with(|| b.size_bytes.cmp(&a.size_bytes))
+            .then_with(|| a.path.cmp(&b.path))
     });
-    // Cleanup discovery is independent of the visible map's row/tile limit.
-    cleanup_candidates.truncate(CLEANUP_CANDIDATE_LIMIT);
+    // Keep every discovered cleanup root. Native views bound visible rows;
+    // presentation limits must never silently discard cleanup evidence.
 
     let safety_totals = safety_totals(&safety_items, root_scan.tree.size_bytes);
     let health = options.include_health.then(|| {
@@ -215,6 +232,7 @@ where
     let root_partial = root_scan.partial;
     let scan = AppScan {
         schema_version: 1,
+        cleanup_discovery_version: 1,
         root_scan,
         system_data,
         largest_items,
@@ -244,8 +262,35 @@ pub fn write_app_scan_cache(scan: &AppScan) -> Result<PathBuf> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&path, serde_json::to_string_pretty(scan)?)?;
+    use std::io::Write;
+    let temporary = path.with_extension(format!("{}.pending", std::process::id()));
+    let file = fs::File::create(&temporary)?;
+    let mut writer = std::io::BufWriter::new(file);
+    serde_json::to_writer(&mut writer, scan)?;
+    writer.flush()?;
+    drop(writer);
+    fs::rename(&temporary, &path)?;
     Ok(path)
+}
+
+/// Observations are disposable; cleanup receipts and history are not.
+pub fn invalidate_scan_caches() -> Result<()> {
+    invalidate_scan_caches_at(&app_cache_dir()?)
+}
+
+fn invalidate_scan_caches_at(directory: &std::path::Path) -> Result<()> {
+    for name in [
+        "latest-app-scan.json",
+        "latest-tree.json",
+        "latest-system-data.json",
+    ] {
+        match std::fs::remove_file(directory.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 pub fn read_app_scan_cache() -> Result<Option<AppScan>> {
@@ -254,7 +299,20 @@ pub fn read_app_scan_cache() -> Result<Option<AppScan>> {
         return Ok(None);
     }
     let data = fs::read_to_string(path)?;
-    Ok(Some(serde_json::from_str(&data)?))
+    // A scan cache is disposable. An interrupted or obsolete cache must not
+    // prevent the user from starting a fresh scan.
+    let Ok(scan) = serde_json::from_str::<AppScan>(&data) else {
+        return Ok(None);
+    };
+    if scan.root_scan.mode == ScanMode::Deep
+        && (scan.root_scan.metrics.accounting_version != 1 || scan.cleanup_discovery_version != 1)
+    {
+        return Ok(None);
+    }
+    if !scan.root_scan.root.exists() {
+        return Ok(None);
+    }
+    Ok(Some(scan))
 }
 
 pub fn recipes() -> AppRecipes {
@@ -482,6 +540,8 @@ fn app_scan_item(node: &StorageNode, root_size: u64) -> AppScanItem {
             node.cleanup_action.clone()
         },
         cleanup_reason: node.cleanup_reason.clone(),
+        logical_size_bytes: node.logical_size_bytes,
+        hard_link_duplicate: node.hard_link_duplicate,
     }
 }
 
@@ -544,6 +604,92 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn cache_invalidation_preserves_unrelated_persisted_state() {
+        let directory = tempdir().unwrap();
+        for name in [
+            "latest-app-scan.json",
+            "latest-tree.json",
+            "latest-system-data.json",
+            "history.tsv",
+            "receipt.json",
+        ] {
+            fs::write(directory.path().join(name), "fixture").unwrap();
+        }
+        invalidate_scan_caches_at(directory.path()).unwrap();
+        invalidate_scan_caches_at(directory.path()).unwrap();
+        assert!(!directory.path().join("latest-app-scan.json").exists());
+        assert!(directory.path().join("history.tsv").exists());
+        assert!(directory.path().join("receipt.json").exists());
+    }
+
+    #[test]
+    fn deep_scan_retains_all_project_candidates_beyond_former_cap_and_visible_limits() {
+        let directory = tempdir().unwrap();
+        for id in 0..640 {
+            let project = directory.path().join(format!("project-{id:04}"));
+            fs::create_dir_all(project.join("node_modules/package")).unwrap();
+            fs::write(project.join("package.json"), "{}").unwrap();
+            fs::write(project.join("node_modules/package/output"), vec![1; 4096]).unwrap();
+        }
+        let result = scan(AppScanOptions {
+            root: directory.path().to_path_buf(),
+            depth: 1,
+            limit: 1,
+            mode: ScanMode::Deep,
+            include_system_data: false,
+            include_health: false,
+        })
+        .unwrap();
+        assert_eq!(result.cleanup_discovery_version, 1);
+        assert_eq!(result.largest_items.len(), 1);
+        assert_eq!(result.root_scan.discovered_cleanup.len(), 640);
+        assert_eq!(result.cleanup_candidates.len(), 640);
+        let paths: std::collections::HashSet<_> = result
+            .cleanup_candidates
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        assert_eq!(paths.len(), 640);
+        let root = directory.path().canonicalize().unwrap();
+        for id in 0..640 {
+            assert!(paths.contains(&root.join(format!("project-{id:04}/node_modules"))));
+        }
+        assert!(result
+            .cleanup_candidates
+            .iter()
+            .all(|item| item.path.ends_with("node_modules")));
+        // Persisted results retain every candidate, rather than reintroducing a cache limit.
+        let restored: AppScan =
+            serde_json::from_slice(&serde_json::to_vec(&result).unwrap()).unwrap();
+        assert_eq!(restored.cleanup_candidates.len(), 640);
+    }
+
+    #[test]
+    fn scanning_a_cache_scope_keeps_every_direct_candidate_without_selecting_scope_itself() {
+        let directory = tempdir().unwrap();
+        let scope = directory.path().join("Library/Caches/FixtureApp");
+        fs::create_dir_all(&scope).unwrap();
+        for id in 0..640 {
+            fs::write(scope.join(format!("cache-{id:04}")), vec![1; 4096]).unwrap();
+        }
+        let result = scan(AppScanOptions {
+            root: scope.clone(),
+            depth: 1,
+            limit: 1,
+            mode: ScanMode::Deep,
+            include_system_data: false,
+            include_health: false,
+        })
+        .unwrap();
+        assert_eq!(result.cleanup_candidates.len(), 640);
+        let canonical_scope = scope.canonicalize().unwrap();
+        assert!(result
+            .cleanup_candidates
+            .iter()
+            .all(|item| item.path != canonical_scope));
+    }
 
     #[test]
     fn hidden_project_output_and_editor_caches_are_exposed_but_user_data_is_not() {

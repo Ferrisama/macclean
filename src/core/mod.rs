@@ -1,4 +1,5 @@
 pub mod app_scan;
+pub mod cache_catalog;
 pub mod cleanup_targets;
 pub mod cmd;
 pub mod fs;
@@ -18,9 +19,17 @@ pub fn state_dir() -> anyhow::Result<PathBuf> {
     if let Some(path) = std::env::var_os("MACCLEAN_STATE_DIR").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(path));
     }
-    let Some(home) = dirs::home_dir() else {
-        anyhow::bail!("Could not find home directory.");
-    };
+    default_state_dir()
+}
+
+#[cfg(test)]
+fn default_state_dir() -> anyhow::Result<PathBuf> {
+    Ok(std::env::temp_dir().join(format!("macclean-unit-state-{}", std::process::id())))
+}
+
+#[cfg(not(test))]
+fn default_state_dir() -> anyhow::Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory."))?;
     Ok(home.join("Library/Application Support/macclean"))
 }
 

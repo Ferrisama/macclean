@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 final class CompletionGate: @unchecked Sendable {
@@ -24,6 +25,7 @@ final class CompletionGate: @unchecked Sendable {
 final class ProcessOutputBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
+    private var lineSearchOffset = 0
     private let limit: Int?
 
     init(limit: Int? = nil) {
@@ -48,6 +50,7 @@ final class ProcessOutputBuffer: @unchecked Sendable {
     func replace(with newData: Data) {
         lock.lock()
         data = newData
+        lineSearchOffset = 0
         lock.unlock()
     }
 
@@ -56,13 +59,19 @@ final class ProcessOutputBuffer: @unchecked Sendable {
         defer { lock.unlock() }
         data.append(newData)
         var lines: [Data] = []
-        while let newline = data.firstIndex(of: 0x0A) {
-            lines.append(Data(data[..<newline]))
-            data.removeSubrange(...newline)
+        var recordStart = data.startIndex
+        var cursor = data.index(data.startIndex, offsetBy: min(lineSearchOffset, data.count))
+        while let newline = data[cursor...].firstIndex(of: 0x0A) {
+            lines.append(Data(data[recordStart..<newline]))
+            recordStart = data.index(after: newline)
+            cursor = recordStart
         }
+        if recordStart != data.startIndex { data.removeSubrange(..<recordStart) }
+        lineSearchOffset = data.count
         if finish, !data.isEmpty {
             lines.append(data)
             data.removeAll(keepingCapacity: false)
+            lineSearchOffset = 0
         }
         return lines
     }
@@ -180,7 +189,8 @@ final class MacCleanService {
                 else { return }
                 onProgress(decoded)
             }
-            return try decodeScan(data)
+            struct ResultEnvelope: Decodable { let type: String; let data: AppScan }
+            return try JSONDecoder.macclean.decode(ResultEnvelope.self, from: data).data
         }
         let data = try await run(executable: executable, arguments: arguments)
         return try decodeScan(data)
@@ -224,111 +234,64 @@ final class MacCleanService {
         return try JSONDecoder.macclean.decode(AppScan?.self, from: data)
     }
 
-    func recipes() async throws -> AppRecipes {
+    func cacheCatalog() async throws -> CacheCatalog {
         let executable = try resolveBinary()
-        let data = try await run(executable: executable, arguments: ["app-recipes"])
-        return try JSONDecoder.macclean.decode(AppRecipes.self, from: data)
+        return try JSONDecoder.macclean.decode(CacheCatalog.self, from: await run(executable: executable, arguments: ["app-caches"]))
     }
 
-    func versions(projects: [String]) async throws -> InstalledVersionReport {
-        let executable = try resolveBinary()
-        var arguments = ["app-versions"]
-        for root in projects { arguments.append(contentsOf: ["--projects", root]) }
-        return try JSONDecoder.macclean.decode(InstalledVersionReport.self,
-                                               from: await run(executable: executable, arguments: arguments))
+    private func spotlightLastOpened(path: String) async -> Date? {
+        guard let data = try? await run(executable: URL(fileURLWithPath: "/usr/bin/mdls"), arguments: ["-raw", "-name", "kMDItemLastUsedDate", path]),
+              let value = String(data: data, encoding: .utf8) else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
+        return formatter.date(from: value.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    func installedApplications() async throws -> [InstalledApplication] {
-        let executable = try resolveBinary()
-        let data = try await run(executable: executable, arguments: ["app-uninstall-list"])
-        return try JSONDecoder.macclean.decode([InstalledApplication].self, from: data)
-    }
-
-    func uninstallPlan(path: String, deep: Bool) async throws -> UninstallPlan {
-        let executable = try resolveBinary()
-        var arguments = ["app-uninstall-plan", path]
-        if deep { arguments.append("--deep") }
-        let data = try await run(executable: executable, arguments: arguments)
-        return try JSONDecoder.macclean.decode(UninstallPlan.self, from: data)
-    }
-
-    func duplicateScan(
-        path: String,
-        minMB: UInt64,
-        jobID: UUID,
-        onProgress: @escaping @Sendable (DuplicateScanProgress) -> Void
-    ) async throws -> DuplicateReport {
-        let executable = try resolveBinary()
-        let data = try await runStreaming(
-            executable: executable,
-            arguments: ["app-dupes", path, "--min", String(minMB), "--progress"],
-            jobID: jobID
-        ) { line in
-            guard let lineData = line.data(using: .utf8),
-                  let envelope = try? JSONDecoder.macclean.decode(
-                    DuplicateProgressEnvelope.self,
-                    from: lineData
-                  ),
-                  envelope.type == "progress",
-                  let progress = envelope.data
-            else { return }
-            onProgress(progress)
+    func usage(path: String) async -> ItemUsage {
+        let modified = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+        let lastOpened = await spotlightLastOpened(path: path)
+        let owner: (String, [String])?
+        if path.contains("/stremio-server/") || path.contains("/Stremio/") || path.lowercased().contains("/caches/com.stremio") {
+            owner = ("Stremio", ["com.stremio.stremio-shell-macos", "com.westbridge.stremio5-mac", "com.stremio.Stremio"])
+        } else if path.contains("/Application Support/Code/") { owner = ("Visual Studio Code", ["com.microsoft.VSCode"]) }
+        else { owner = nil }
+        let appInfo: (String?, Bool?) = await MainActor.run {
+            guard let owner else { return (nil, nil) }
+            let location = owner.1.compactMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)?.path }.first
+            let running = NSWorkspace.shared.runningApplications.contains { app in
+                app.bundleIdentifier.map { owner.1.contains($0) } == true
+            }
+            return (location, running)
         }
-        return try JSONDecoder.macclean.decode(DuplicateReport.self, from: data)
+        let appDate: Date?
+        if let path = appInfo.0 { appDate = await spotlightLastOpened(path: path) } else { appDate = nil }
+        return ItemUsage(modified: modified, lastOpened: lastOpened?.formatted(date: .abbreviated, time: .shortened),
+                         appName: owner?.0, appLastOpened: appDate?.formatted(date: .abbreviated, time: .shortened), appRunning: appInfo.1)
     }
 
-    private struct DuplicateProgressEnvelope: Decodable {
-        let type: String
-        let data: DuplicateScanProgress?
+    func folderActivity(paths: [String]) async -> [ApplicationActivity] {
+        var results: [ApplicationActivity] = []
+        for path in paths {
+            guard !Task.isCancelled else { break }
+            let opened = await spotlightLastOpened(path: path)
+            results.append(ApplicationActivity(path: path, name: URL(fileURLWithPath: path).lastPathComponent, lastOpened: opened, running: false))
+        }
+        return results
     }
 
-    func duplicateCleanup(
-        request: DuplicateCleanupRequest,
-        reviewTokens: [String: String] = [:],
-        dryRun: Bool
-    ) async throws -> DuplicateCleanupResponse {
-        struct BackendSelection: Encodable {
-            let path: String
-            let reviewToken: String?
+    func applicationActivity() async -> [ApplicationActivity] {
+        let roots = [URL(fileURLWithPath: "/Applications"), FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications")]
+        let apps = roots.flatMap { (try? FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? [] }
+            .filter { $0.pathExtension == "app" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let runningPaths = await MainActor.run { Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.path }) }
+        var results: [ApplicationActivity] = []
+        for app in apps {
+            guard !Task.isCancelled else { break }
+            let opened = await spotlightLastOpened(path: app.path)
+            results.append(ApplicationActivity(path: app.path, name: app.deletingPathExtension().lastPathComponent, lastOpened: opened, running: runningPaths.contains(app.path)))
         }
-        struct BackendGroup: Encodable {
-            let id: String
-            let keeperPath: String
-            let files: [String]
-            let selected: [BackendSelection]
-        }
-        struct BackendRequest: Encodable {
-            let groups: [BackendGroup]
-        }
-
-        let backendRequest = BackendRequest(groups: request.groups.map { group in
-            BackendGroup(
-                id: group.groupID,
-                keeperPath: group.keeperPath,
-                files: group.reviewedMemberPaths,
-                selected: group.deletePaths.map {
-                    BackendSelection(path: $0, reviewToken: reviewTokens[$0])
-                }
-            )
-        })
-        let encoder = JSONEncoder()
-        encoder.keyEncodingStrategy = .convertToSnakeCase
-        let requestData = try encoder.encode(backendRequest)
-        let requestURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("macclean-duplicate-review-\(UUID().uuidString).json")
-        try requestData.write(to: requestURL, options: .atomic)
-        defer { try? FileManager.default.removeItem(at: requestURL) }
-
-        let executable = try resolveBinary()
-        var arguments: [String] = []
-        if dryRun { arguments.append("--dry-run") }
-        arguments.append(contentsOf: [
-            "app-dupes-trash",
-            "--request-file",
-            requestURL.path
-        ])
-        let data = try await run(executable: executable, arguments: arguments)
-        return try JSONDecoder.macclean.decode(DuplicateCleanupResponse.self, from: data)
+        return results
     }
 
     func trash(
@@ -505,11 +468,8 @@ final class MacCleanService {
                         finish(.failure(CancellationError()))
                     } else if process.terminationStatus == 0 {
                         let resultData = resultBuffer.snapshot()
-                        if let object = try? JSONSerialization.jsonObject(with: resultData),
-                       let dict = object as? [String: Any],
-                       dict["type"] as? String == "result",
-                       let payload = dict["data"] {
-                            finish(.success((try? JSONSerialization.data(withJSONObject: payload)) ?? Data()))
+                        if !resultData.isEmpty {
+                            finish(.success(resultData))
                         } else {
                             finish(.failure(MacCleanServiceError.invalidOutput("Streaming scan did not return a result.")))
                         }
@@ -530,23 +490,17 @@ final class MacCleanService {
                         if data.isEmpty { break }
                         for line in lineBuffer.appendAndTakeLines(data) {
                             guard !line.isEmpty else { continue }
-                            if let text = String(data: line, encoding: .utf8) {
-                                onLine(text)
-                            }
-                            if let object = try? JSONSerialization.jsonObject(with: line),
-                               let dictionary = object as? [String: Any],
-                               dictionary["type"] as? String == "result" {
+                            if line.starts(with: Data("{\"type\":\"result\"".utf8)) {
                                 resultBuffer.replace(with: line)
+                            } else if let text = String(data: line, encoding: .utf8) {
+                                onLine(text)
                             }
                         }
                     }
                     for line in lineBuffer.appendAndTakeLines(Data(), finish: true) where !line.isEmpty {
-                        if let text = String(data: line, encoding: .utf8) { onLine(text) }
-                        if let object = try? JSONSerialization.jsonObject(with: line),
-                           let dictionary = object as? [String: Any],
-                           dictionary["type"] as? String == "result" {
+                        if line.starts(with: Data("{\"type\":\"result\"".utf8)) {
                             resultBuffer.replace(with: line)
-                        }
+                        } else if let text = String(data: line, encoding: .utf8) { onLine(text) }
                     }
                     readers.leave()
                 }

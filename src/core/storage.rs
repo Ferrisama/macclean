@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::fs::Metadata;
 #[cfg(unix)]
@@ -12,7 +13,6 @@ use crate::core::fs::dir_size;
 use crate::core::CleanKind;
 
 const FAST_SCAN_BUDGET: Duration = Duration::from_secs(8);
-const DISCOVERED_CANDIDATE_LIMIT: usize = 512;
 type ScanProgressCallback<'a> = dyn Fn(&Path, u64, bool, usize, usize) + Sync + 'a;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,11 +36,70 @@ pub struct StorageScan {
     #[serde(default)]
     pub metrics: ScanMetrics,
     pub tree: StorageNode,
+    /// Flat, complete observations for navigation; presentation limits do not truncate this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<ScanInventory>,
     /// Deep scans retain top cleanup roots even when presentation depth or
     /// row limits omit them from the visible tree. AppScan exposes these in
     /// its own candidate list; tree scans keep their existing JSON contract.
     #[serde(skip)]
     pub discovered_cleanup: Vec<StorageNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanInventory {
+    pub root: PathBuf,
+    pub nodes: Vec<InventoryNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InventoryNode {
+    pub name: String,
+    pub parent: Option<usize>,
+    pub size_bytes: u64,
+    /// Unique logical bytes attributed to this subtree; unavailable in legacy/fast scans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub hard_link_duplicate: bool,
+    pub is_dir: bool,
+    pub partial: bool,
+}
+
+#[derive(Default)]
+struct InventoryBuilder {
+    nodes: Vec<InventoryNode>,
+    parents: Vec<usize>,
+}
+
+impl InventoryBuilder {
+    fn enter(&mut self, path: &Path) {
+        let id = self.nodes.len();
+        self.nodes.push(InventoryNode {
+            name: path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into_owned(),
+            parent: self.parents.last().copied(),
+            size_bytes: 0,
+            logical_size_bytes: None,
+            hard_link_duplicate: false,
+            is_dir: false,
+            partial: true,
+        });
+        self.parents.push(id);
+    }
+    fn finish(&mut self, node: &StorageNode) {
+        if let Some(id) = self.parents.pop() {
+            let entry = &mut self.nodes[id];
+            entry.size_bytes = node.size_bytes;
+            entry.logical_size_bytes = node.logical_size_bytes;
+            entry.hard_link_duplicate = node.hard_link_duplicate;
+            entry.is_dir = node.is_dir;
+            entry.partial = node.partial;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -53,6 +112,11 @@ pub struct ScanMetrics {
     pub directories_seen: u64,
     pub files_seen: u64,
     pub metadata_errors: u64,
+    /// Version 1: allocated blocks including directories; unique device/inode file accounting.
+    #[serde(default)]
+    pub accounting_version: u32,
+    #[serde(default)]
+    pub hard_links_deduplicated: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +124,10 @@ pub struct StorageNode {
     pub name: String,
     pub path: PathBuf,
     pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub hard_link_duplicate: bool,
     pub percent_of_parent: f64,
     pub is_dir: bool,
     pub partial: bool,
@@ -68,6 +136,33 @@ pub struct StorageNode {
     pub cleanup_action: String,
     pub cleanup_reason: String,
     pub children: Vec<StorageNode>,
+}
+
+struct DeepScanContext {
+    metrics: ScanMetrics,
+    discovered_cleanup: Vec<StorageNode>,
+    inventory: Option<InventoryBuilder>,
+    seen_files: HashSet<(u64, u64)>,
+}
+
+impl DeepScanContext {
+    fn measured_node(&mut self, path: &Path, metadata: &Metadata) -> StorageNode {
+        let mut node = classified_node(path, allocated_size(metadata), metadata.is_dir(), false);
+        node.logical_size_bytes = Some(if metadata.is_dir() { 0 } else { metadata.len() });
+        #[cfg(unix)]
+        if !metadata.is_dir()
+            && metadata.nlink() > 1
+            && !self.seen_files.insert((metadata.dev(), metadata.ino()))
+        {
+            // Every directory entry stays in the inventory. Only its first observed
+            // link contributes bytes; attribution across sibling folders is traversal-order dependent.
+            node.size_bytes = 0;
+            node.logical_size_bytes = Some(0);
+            node.hard_link_duplicate = true;
+            self.metrics.hard_links_deduplicated += 1;
+        }
+        node
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,11 +230,32 @@ pub fn scan_tree_with_progress(
     mode: ScanMode,
     progress: Option<&ScanProgressCallback<'_>>,
 ) -> Result<StorageScan> {
+    scan_tree_impl(root, depth, limit, mode, progress, false)
+}
+
+pub fn scan_tree_with_inventory(
+    root: PathBuf,
+    depth: usize,
+    limit: usize,
+    progress: Option<&ScanProgressCallback<'_>>,
+) -> Result<StorageScan> {
+    scan_tree_impl(root, depth, limit, ScanMode::Deep, progress, true)
+}
+
+fn scan_tree_impl(
+    root: PathBuf,
+    depth: usize,
+    limit: usize,
+    mode: ScanMode,
+    progress: Option<&ScanProgressCallback<'_>>,
+    collect_inventory: bool,
+) -> Result<StorageScan> {
     if !root.exists() {
         bail!("Path does not exist: {}", root.display());
     }
     let start = Instant::now();
     let mut discovered_cleanup = Vec::new();
+    let mut inventory = collect_inventory.then(InventoryBuilder::default);
     let (mut tree, metrics) = if mode == ScanMode::Fast {
         let tree = build_fast_tree(
             &root,
@@ -155,24 +271,25 @@ pub fn scan_tree_with_progress(
             },
         )
     } else {
-        let mut metrics = ScanMetrics {
-            implementation: "single-pass".into(),
-            ..ScanMetrics::default()
+        let mut context = DeepScanContext {
+            metrics: ScanMetrics {
+                implementation: "single-pass".into(),
+                accounting_version: 1,
+                ..ScanMetrics::default()
+            },
+            discovered_cleanup: Vec::new(),
+            inventory: inventory.take(),
+            seen_files: HashSet::new(),
         };
-        let tree = build_single_pass_tree(
-            &root,
-            depth,
-            limit,
-            progress,
-            &mut metrics,
-            &mut discovered_cleanup,
-        )?;
-        (tree, metrics)
+        let tree = build_single_pass_tree(&root, depth, limit, progress, &mut context)?;
+        discovered_cleanup = context.discovered_cleanup;
+        inventory = context.inventory;
+        (tree, context.metrics)
     };
     set_child_percentages(&mut tree);
     let partial = tree.partial;
     Ok(StorageScan {
-        root,
+        root: tree.path.clone(),
         mode,
         depth,
         limit,
@@ -183,6 +300,10 @@ pub fn scan_tree_with_progress(
             "One or more paths could not be fully read or sized; totals may be incomplete.".into()
         }),
         metrics,
+        inventory: inventory.map(|builder| ScanInventory {
+            root: tree.path.clone(),
+            nodes: builder.nodes,
+        }),
         tree,
         discovered_cleanup,
     })
@@ -274,39 +395,43 @@ fn build_single_pass_tree(
     visible_depth: usize,
     limit: usize,
     progress: Option<&ScanProgressCallback<'_>>,
-    metrics: &mut ScanMetrics,
-    discovered_cleanup: &mut Vec<StorageNode>,
+    context: &mut DeepScanContext,
 ) -> Result<StorageNode> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    metrics.entries_seen = metrics.entries_seen.saturating_add(1);
+    if let Some(builder) = context.inventory.as_mut() {
+        builder.enter(&root);
+    }
+    context.metrics.entries_seen = context.metrics.entries_seen.saturating_add(1);
     let metadata = match fs::symlink_metadata(&root) {
         Ok(metadata) => metadata,
         Err(_) => {
-            metrics.metadata_errors = metrics.metadata_errors.saturating_add(1);
-            return Ok(classified_node(&root, 0, false, true));
+            context.metrics.metadata_errors = context.metrics.metadata_errors.saturating_add(1);
+            let node = classified_node(&root, 0, false, true);
+            if let Some(builder) = context.inventory.as_mut() {
+                builder.finish(&node);
+            }
+            return Ok(node);
         }
     };
     if !metadata.file_type().is_dir() {
-        metrics.files_seen = metrics.files_seen.saturating_add(1);
-        return Ok(classified_node(
-            &root,
-            allocated_size(&metadata),
-            false,
-            false,
-        ));
+        context.metrics.files_seen = context.metrics.files_seen.saturating_add(1);
+        let node = context.measured_node(&root, &metadata);
+        if let Some(builder) = context.inventory.as_mut() {
+            builder.finish(&node);
+        }
+        return Ok(node);
     }
 
-    metrics.directories_seen = metrics.directories_seen.saturating_add(1);
-    let mut root_node = classified_node(&root, 0, true, false);
-    let root_is_candidate = matches!(
-        root_node.safety,
-        StorageSafety::Safe | StorageSafety::Review
-    );
+    context.metrics.directories_seen = context.metrics.directories_seen.saturating_add(1);
+    let mut root_node = context.measured_node(&root, &metadata);
     let entries: Vec<_> = match fs::read_dir(&root) {
         Ok(entries) => entries.collect(),
         Err(_) => {
-            metrics.metadata_errors = metrics.metadata_errors.saturating_add(1);
+            context.metrics.metadata_errors = context.metrics.metadata_errors.saturating_add(1);
             root_node.partial = true;
+            if let Some(builder) = context.inventory.as_mut() {
+                builder.finish(&root_node);
+            }
             return Ok(root_node);
         }
     };
@@ -316,7 +441,7 @@ fn build_single_pass_tree(
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => {
-                metrics.metadata_errors = metrics.metadata_errors.saturating_add(1);
+                context.metrics.metadata_errors = context.metrics.metadata_errors.saturating_add(1);
                 root_node.partial = true;
                 continue;
             }
@@ -325,11 +450,18 @@ fn build_single_pass_tree(
             &entry.path(),
             visible_depth.saturating_sub(1),
             limit,
-            metrics,
-            discovered_cleanup,
-            root_is_candidate,
+            // The selected scope itself is not offered for cleanup. Its
+            // independently classified children must still be discovered.
+            false,
+            context,
         )?;
         root_node.size_bytes = root_node.size_bytes.saturating_add(child.size_bytes);
+        root_node.logical_size_bytes = Some(
+            root_node
+                .logical_size_bytes
+                .unwrap_or(0)
+                .saturating_add(child.logical_size_bytes.unwrap_or(0)),
+        );
         root_node.partial |= child.partial;
         if let Some(progress) = progress {
             progress(
@@ -347,6 +479,9 @@ fn build_single_pass_tree(
     retained_children.sort_by_key(|child| std::cmp::Reverse(child.size_bytes));
     retained_children.truncate(limit);
     root_node.children = retained_children;
+    if let Some(builder) = context.inventory.as_mut() {
+        builder.finish(&root_node);
+    }
     Ok(root_node)
 }
 
@@ -354,36 +489,48 @@ fn single_pass_node(
     path: &Path,
     visible_depth: usize,
     limit: usize,
-    metrics: &mut ScanMetrics,
-    discovered_cleanup: &mut Vec<StorageNode>,
     covered_by_candidate: bool,
+    context: &mut DeepScanContext,
 ) -> Result<StorageNode> {
-    metrics.entries_seen = metrics.entries_seen.saturating_add(1);
+    if let Some(builder) = context.inventory.as_mut() {
+        builder.enter(path);
+    }
+    context.metrics.entries_seen = context.metrics.entries_seen.saturating_add(1);
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(_) => {
-            metrics.metadata_errors = metrics.metadata_errors.saturating_add(1);
-            return Ok(classified_node(path, 0, false, true));
+            context.metrics.metadata_errors = context.metrics.metadata_errors.saturating_add(1);
+            let node = classified_node(path, 0, false, true);
+            if let Some(builder) = context.inventory.as_mut() {
+                builder.finish(&node);
+            }
+            return Ok(node);
         }
     };
     let is_dir = metadata.file_type().is_dir();
     if !is_dir {
-        metrics.files_seen = metrics.files_seen.saturating_add(1);
-        let node = classified_node(path, allocated_size(&metadata), false, false);
+        context.metrics.files_seen = context.metrics.files_seen.saturating_add(1);
+        let node = context.measured_node(path, &metadata);
         if !covered_by_candidate && is_cleanup_candidate(&node) {
-            record_discovered_candidate(discovered_cleanup, &node);
+            record_discovered_candidate(&mut context.discovered_cleanup, &node);
+        }
+        if let Some(builder) = context.inventory.as_mut() {
+            builder.finish(&node);
         }
         return Ok(node);
     }
 
-    metrics.directories_seen = metrics.directories_seen.saturating_add(1);
-    let mut node = classified_node(path, 0, true, false);
+    context.metrics.directories_seen = context.metrics.directories_seen.saturating_add(1);
+    let mut node = context.measured_node(path, &metadata);
     let captures_candidate = !covered_by_candidate && is_cleanup_candidate(&node);
     let read_dir = match fs::read_dir(path) {
         Ok(entries) => entries,
         Err(_) => {
-            metrics.metadata_errors = metrics.metadata_errors.saturating_add(1);
+            context.metrics.metadata_errors = context.metrics.metadata_errors.saturating_add(1);
             node.partial = true;
+            if let Some(builder) = context.inventory.as_mut() {
+                builder.finish(&node);
+            }
             return Ok(node);
         }
     };
@@ -393,7 +540,7 @@ fn single_pass_node(
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => {
-                metrics.metadata_errors = metrics.metadata_errors.saturating_add(1);
+                context.metrics.metadata_errors = context.metrics.metadata_errors.saturating_add(1);
                 node.partial = true;
                 continue;
             }
@@ -402,11 +549,15 @@ fn single_pass_node(
             &entry.path(),
             visible_depth.saturating_sub(1),
             limit,
-            metrics,
-            discovered_cleanup,
             covered_by_candidate || captures_candidate,
+            context,
         )?;
         node.size_bytes = node.size_bytes.saturating_add(child.size_bytes);
+        node.logical_size_bytes = Some(
+            node.logical_size_bytes
+                .unwrap_or(0)
+                .saturating_add(child.logical_size_bytes.unwrap_or(0)),
+        );
         node.partial |= child.partial;
         if visible_depth > 0 && child.size_bytes > 0 {
             retained_children.push(child);
@@ -416,7 +567,10 @@ fn single_pass_node(
     retained_children.truncate(limit);
     node.children = retained_children;
     if captures_candidate && node.size_bytes > 0 {
-        record_discovered_candidate(discovered_cleanup, &node);
+        record_discovered_candidate(&mut context.discovered_cleanup, &node);
+    }
+    if let Some(builder) = context.inventory.as_mut() {
+        builder.finish(&node);
     }
     Ok(node)
 }
@@ -431,17 +585,7 @@ fn record_discovered_candidate(items: &mut Vec<StorageNode>, node: &StorageNode)
     }
     let mut candidate = node.clone();
     candidate.children.clear();
-    if items.len() < DISCOVERED_CANDIDATE_LIMIT {
-        items.push(candidate);
-    } else if let Some((smallest_index, smallest)) = items
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, item)| item.size_bytes)
-    {
-        if candidate.size_bytes > smallest.size_bytes {
-            items[smallest_index] = candidate;
-        }
-    }
+    items.push(candidate);
 }
 
 // Kept temporarily for system-data helpers that still use bounded sizing.
@@ -473,6 +617,8 @@ fn build_node(
             .unwrap_or_else(|| path.display().to_string()),
         path: path.to_path_buf(),
         size_bytes,
+        logical_size_bytes: None,
+        hard_link_duplicate: false,
         percent_of_parent: 100.0,
         is_dir,
         partial,
@@ -621,6 +767,8 @@ pub(crate) fn classified_node(
             .unwrap_or_else(|| path.display().to_string()),
         path: path.to_path_buf(),
         size_bytes,
+        logical_size_bytes: None,
+        hard_link_duplicate: false,
         percent_of_parent: 100.0,
         is_dir,
         partial,
@@ -889,6 +1037,19 @@ fn classify_storage_path(path: &Path, is_dir: bool) -> StorageClassification {
             "Review build output before moving to Trash.",
             "Verified Cargo build output. Stop builds and tests first; rebuilding will take longer. Source files are outside this folder.",
         )
+    } else if let Some(rule) =
+        dirs::home_dir().and_then(|home| crate::core::cache_catalog::rule_for_path(path, &home))
+    {
+        (
+            if rule.requires_review() {
+                StorageSafety::Review
+            } else {
+                StorageSafety::Safe
+            },
+            CleanKind::Cache,
+            "Review cache before moving to Trash.",
+            rule.consequence,
+        )
     } else if crate::core::cleanup_targets::is_editor_cache(path) {
         (
             StorageSafety::Safe,
@@ -897,7 +1058,7 @@ fn classify_storage_path(path: &Path, is_dir: bool) -> StorageClassification {
             "Known VS Code cache or downloadable Codex runtime cache. Quit the relevant app first; settings and sessions are excluded.",
         )
     } else if has_component_sequence(&components, &["library", "caches"])
-        || has_component_sequence(&components, &[".npm"])
+        || has_component_sequence(&components, &[".npm", "_cacache"])
         || has_component_sequence(&components, &[".yarn", "cache"])
         || has_component_sequence(&components, &[".yarn", "berry", "cache"])
         || has_component_sequence(&components, &[".local", "share", "pnpm", "store"])
@@ -1125,12 +1286,7 @@ fn is_installer(path: &Path) -> bool {
 
 #[cfg(unix)]
 fn allocated_size(metadata: &Metadata) -> u64 {
-    let allocated = metadata.blocks().saturating_mul(512);
-    if allocated == 0 && metadata.len() > 0 {
-        metadata.len()
-    } else {
-        allocated
-    }
+    metadata.blocks().saturating_mul(512)
 }
 
 #[cfg(not(unix))]
@@ -1158,6 +1314,137 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn sparse_file_preserves_zero_allocation_and_reports_logical_bytes() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("sparse");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(1024 * 1024 * 1024)
+            .unwrap();
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        let scan = scan_tree_with_inventory(directory.path().to_path_buf(), 1, 10, None).unwrap();
+        let inventory = scan.inventory.unwrap();
+        let sparse = inventory
+            .nodes
+            .iter()
+            .find(|node| node.name == "sparse")
+            .unwrap();
+        assert_eq!(sparse.logical_size_bytes, Some(metadata.len()));
+        assert_eq!(sparse.size_bytes, metadata.blocks() * 512);
+        assert_eq!(scan.tree.logical_size_bytes, Some(1024 * 1024 * 1024));
+        assert_eq!(
+            scan.tree.size_bytes,
+            allocated_size(&fs::symlink_metadata(directory.path()).unwrap()) + sparse.size_bytes
+        );
+        assert_eq!(scan.metrics.accounting_version, 1);
+    }
+
+    #[test]
+    fn hard_links_are_counted_once_but_every_name_is_retained() {
+        let directory = tempdir().unwrap();
+        fs::create_dir(directory.path().join("nested")).unwrap();
+        let original = directory.path().join("original");
+        fs::write(&original, vec![7; 8192]).unwrap();
+        fs::hard_link(&original, directory.path().join("nested/alias")).unwrap();
+        let scan = scan_tree_with_inventory(directory.path().to_path_buf(), 2, 10, None).unwrap();
+        let expected = allocated_size(&fs::symlink_metadata(&original).unwrap())
+            + allocated_size(&fs::symlink_metadata(directory.path()).unwrap())
+            + allocated_size(&fs::symlink_metadata(directory.path().join("nested")).unwrap());
+        assert_eq!(scan.tree.size_bytes, expected);
+        assert_eq!(scan.tree.logical_size_bytes, Some(8192));
+        assert_eq!(scan.metrics.hard_links_deduplicated, 1);
+        assert_eq!(scan.metrics.files_seen, 2);
+        let nodes = scan.inventory.unwrap().nodes;
+        assert_eq!(nodes.len(), 4);
+        assert_eq!(
+            nodes.iter().filter(|node| node.hard_link_duplicate).count(),
+            1
+        );
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|node| !node.is_dir)
+                .map(|node| node.size_bytes)
+                .sum::<u64>(),
+            allocated_size(&fs::symlink_metadata(original).unwrap())
+        );
+    }
+
+    #[test]
+    fn symlinks_are_measured_without_traversing_their_targets() {
+        use std::os::unix::fs::symlink;
+        let directory = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("not-scanned"), vec![1; 8192]).unwrap();
+        symlink(outside.path(), directory.path().join("link")).unwrap();
+        symlink("missing", directory.path().join("broken")).unwrap();
+        let scan = scan_tree_with_inventory(directory.path().to_path_buf(), 1, 10, None).unwrap();
+        assert!(!scan.partial);
+        assert_eq!(scan.metrics.files_seen, 2);
+        assert_eq!(scan.metrics.directories_seen, 1);
+        assert_eq!(scan.inventory.unwrap().nodes.len(), 3);
+    }
+
+    #[test]
+    fn legacy_nodes_decode_without_inventing_logical_measurements() {
+        let node = classified_node(Path::new("/fixture"), 123, true, false);
+        let mut legacy = serde_json::to_value(node).unwrap();
+        legacy.as_object_mut().unwrap().remove("logical_size_bytes");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("hard_link_duplicate");
+        let decoded: StorageNode = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.logical_size_bytes, None);
+        assert!(!decoded.hard_link_duplicate);
+    }
+
+    #[test]
+    fn inventory_retains_empty_files_and_all_branches_beyond_presentation_limits() {
+        let directory = tempdir().unwrap();
+        for name in ["one", "two", "three"] {
+            let path = directory.path().join(name).join("nested");
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("data"), vec![1; 4096]).unwrap();
+            fs::write(path.join("empty"), []).unwrap();
+        }
+        let scan = scan_tree_with_inventory(directory.path().to_path_buf(), 1, 1, None).unwrap();
+        assert_eq!(scan.tree.children.len(), 1);
+        let inventory = scan.inventory.as_ref().unwrap();
+        assert_eq!(inventory.nodes.len(), 13);
+        assert_eq!(inventory.nodes[0].parent, None);
+        assert_eq!(
+            inventory
+                .nodes
+                .iter()
+                .filter(|node| node.name == "empty")
+                .count(),
+            3
+        );
+        for (id, node) in inventory.nodes.iter().enumerate().skip(1) {
+            let parent = node.parent.unwrap();
+            assert!(parent < id);
+            assert!(inventory.nodes[parent].is_dir);
+        }
+        assert_eq!(inventory.nodes[0].size_bytes, scan.tree.size_bytes);
+    }
+
+    #[test]
+    fn inventory_flat_encoding_handles_deeper_scopes_than_json_tree_limit() {
+        let directory = tempdir().unwrap();
+        let mut leaf = directory.path().to_path_buf();
+        for _ in 0..140 {
+            leaf.push("a");
+        }
+        fs::create_dir_all(&leaf).unwrap();
+        fs::write(leaf.join("last-file"), "deep").unwrap();
+        let scan = scan_tree_with_inventory(directory.path().to_path_buf(), 1, 1, None).unwrap();
+        let data = serde_json::to_vec(&scan).unwrap();
+        let restored: StorageScan = serde_json::from_slice(&data).unwrap();
+        assert_eq!(restored.inventory.unwrap().nodes.len(), 142);
+    }
 
     #[test]
     fn scan_tree_includes_percentages() {
@@ -1190,7 +1477,10 @@ mod tests {
         assert_eq!(scan.metrics.directories_seen, 4);
         assert_eq!(scan.metrics.files_seen, 3);
         assert_eq!(scan.metrics.entries_seen, 7);
-        assert_eq!(scan.tree.size_bytes, child_total);
+        assert_eq!(
+            scan.tree.size_bytes,
+            child_total + allocated_size(&fs::symlink_metadata(dir.path()).unwrap())
+        );
         assert!(!scan.tree.partial);
     }
 
@@ -1301,7 +1591,7 @@ mod tests {
     #[test]
     fn known_node_cache_roots_are_safe_but_corepack_is_not() {
         for path in [
-            Path::new("/Users/example/.npm"),
+            Path::new("/Users/example/.npm/_cacache"),
             Path::new("/Users/example/.yarn/cache"),
             Path::new("/Users/example/.yarn/berry/cache"),
             Path::new("/Users/example/.local/share/pnpm/store"),

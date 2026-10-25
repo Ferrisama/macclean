@@ -129,6 +129,7 @@ struct StorageScan: Codable {
     let incompleteReason: String?
     let metrics: ScanMetrics?
     let tree: StorageNode
+    var inventory: ScanInventory? = nil
 }
 
 struct ScanMetrics: Codable {
@@ -137,6 +138,8 @@ struct ScanMetrics: Codable {
     let directoriesSeen: UInt64
     let filesSeen: UInt64
     let metadataErrors: UInt64
+    var accountingVersion: UInt64? = nil
+    var hardLinksDeduplicated: UInt64? = nil
 }
 
 struct StorageNode: Codable, Identifiable {
@@ -152,6 +155,8 @@ struct StorageNode: Codable, Identifiable {
     let cleanupAction: String
     let cleanupReason: String
     let children: [StorageNode]
+    var logicalSizeBytes: UInt64? = nil
+    var hardLinkDuplicate: Bool? = nil
 }
 
 struct SystemDataScan: Codable {
@@ -187,6 +192,8 @@ struct AppScanItem: Codable, Identifiable {
     let cleanKind: String
     let cleanupAction: String
     let cleanupReason: String
+    var logicalSizeBytes: UInt64? = nil
+    var hardLinkDuplicate: Bool? = nil
 }
 
 extension AppScanItem {
